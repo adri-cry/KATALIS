@@ -1,0 +1,22 @@
+# --- runtime state -----------------------------------------------------------
+data/
+__pycache__/
+*.py[cod]
+tmp/
+
+# --- secrets -----------------------------------------------------------------
+# Kunci API hidup di .env. Berkas ini tidak boleh pernah masuk riwayat git.
+.env
+
+# --- third-party sources -----------------------------------------------------
+# KEDUA repo sumber TIDAK disimpan di repo ini: ukurannya beberapa megabita dan
+# lisensinya milik proyek masing-masing. Ambil ulang kapan saja dengan:
+#     node tools/fetch_repos.mjs && python tools/extract_repos.py
+vendor/
+repos/
+
+# --- editor noise ------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

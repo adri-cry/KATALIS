@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KATALIS · IDX Intelligence Desk</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f14'/%3E%3Cpath d='M18 44V20M18 32l14-12M18 32l14 12' stroke='%23f0b429' stroke-width='5' stroke-linecap='round' fill='none'/%3E%3Crect x='40' y='22' width='7' height='20' rx='2' fill='%2322c55e'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+      <path d="M18 44V20M18 32l15-13M18 32l15 13" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+      <rect x="41" y="23" width="7" height="18" rx="2.5" fill="#22c55e"/>
+    </svg>
+    <div class="wordmark">
+      <h1>KATALIS</h1>
+      <p>IDX Intelligence Desk</p>
+    </div>
+  </div>
+  <div class="topmeta">
+    <span class="chip chip-live" id="chip-mode">menghubungkan…</span>
+    <span class="chip" id="chip-idx" title="Data khusus IDX dari biner idx">idx · memeriksa</span>
+    <span class="chip" id="chip-ai" title="Lapisan penasihat OpenAI">AI · memeriksa</span>
+    <div class="ihsg">
+      <span class="label">IHSG</span>
+      <strong id="ihsg-price">—</strong>
+      <em id="ihsg-chg">—</em>
+    </div>
+    <div class="clock" id="clock">—</div>
+  </div>
+</header>
+
+<section class="searchbar">
+  <div class="searchfield">
+    <input id="symbol" placeholder="Kode saham — BBCA, BBRI, TLKM…" autocomplete="off" spellcheck="false"
+           aria-label="Kode saham">
+    <button id="analyse" class="primary">Analisis</button>
+  </div>
+  <div class="opts">
+    <label class="toggle"><input type="checkbox" id="opt-ai" checked> pakai AI</label>
+    <label class="toggle"><input type="checkbox" id="opt-auto"> otomatis saat dibuka</label>
+    <span class="muted hint">Membuka halaman hanya memuat harga; analisis berjalan saat tombol ditekan.</span>
+  </div>
+  <div class="quick" id="quick"></div>
+</section>
+
+<main class="grid">
+  <aside class="card watchlist">
+    <div class="card-head">
+      <h2>Watchlist</h2>
+      <button id="refresh" class="ghost" title="Muat ulang harga">⟳</button>
+    </div>
+    <div id="watchlist" class="watchlist-body"><div class="skeleton"></div><div class="skeleton"></div></div>
+    <form id="add-form" class="add-row">
+      <input id="add-symbol" placeholder="Tambah kode" aria-label="Tambah kode saham" spellcheck="false">
+      <button class="ghost" type="submit">+</button>
+    </form>
+  </aside>
+
+  <section class="card chart-card">
+    <div class="card-head">
+      <div class="chart-title">
+        <div class="chart-line">
+          <h2 id="chart-title">—</h2>
+          <span class="chart-price" id="chart-price">—</span>
+          <span class="chart-chg" id="chart-chg">—</span>
+          <span class="chart-live" id="chart-live">menyambung</span>
+        </div>
+        <p id="chart-sub" class="muted">—</p>
+      </div>
+      <div class="chart-tools">
+        <span class="chart-stamp" id="chart-stamp"></span>
+        <div class="ranges" id="ranges">
+          <button data-range="1d">1H</button>
+          <button data-range="5d">5H</button>
+          <button data-range="1mo">1B</button>
+          <button data-range="3mo">3B</button>
+          <button data-range="6mo" class="on">6B</button>
+          <button data-range="1y">1T</button>
+          <button data-range="2y">2T</button>
+        </div>
+        <button id="chart-refresh" class="ghost" title="Muat ulang chart sekarang">⟳</button>
+      </div>
+    </div>
+    <div id="chart" class="chart"><div class="skeleton tall"></div></div>
+    <div class="metrics" id="metrics"></div>
+  </section>
+
+  <section class="card verdict" id="verdict">
+    <div class="empty">
+      <span class="empty-mark">◎</span>
+      <p>Pilih saham di watchlist, lalu tekan <strong>Analisis</strong>.</p>
+      <p class="muted">Lima peran membaca data yang sama dan menghasilkan satu rating.</p>
+    </div>
+  </section>
+</main>
+
+<nav class="tabs" id="tabs" role="tablist">
+  <button data-tab="roles" class="on" role="tab">Dewan Analis</button>
+  <button data-tab="advice" role="tab">Nasihat AI</button>
+  <button data-tab="debate" role="tab">Debat</button>
+  <button data-tab="risk" role="tab">Risiko</button>
+  <button data-tab="journal" role="tab">Jurnal</button>
+  <button data-tab="portfolio" role="tab">Portofolio</button>
+</nav>
+<section class="panel" id="panel">
+  <p class="muted pad">Jalankan analisis untuk melihat dewan analis bekerja.</p>
+</section>
+
+<footer class="foot">
+  <p><strong>KATALIS</strong> menggabungkan dua proyek sumber terbuka: pola dewan analis dari
+  <em>TradingAgents</em> (Apache-2.0) dan kedalaman data IDX dari <em>idx</em> (MIT).</p>
+  <p class="muted">Mesin ini deterministik dan berjalan di komputer Anda. Hasilnya bukan nasihat investasi;
+  data harga dapat tertunda. Selalu periksa sendiri sebelum bertransaksi.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1204 @@
+/* KATALIS dashboard — plain DOM, no framework, no build. */
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const state = {
+  symbol: "BBCA.JK",
+  range: "6mo",
+  tab: "roles",
+  analysis: null,
+  journal: null,
+  portfolio: null,
+  health: null,
+  chart: null,
+  bars: [],
+  live: null,
+  stream: null,
+  poll: null,
+  lastFetch: 0,
+  hoverIndex: null,
+  hoverY: null,
+};
+
+/* Preferences that survive a refresh. A blocked storage (private mode) must
+   fall back to the defaults rather than break the page. */
+const prefs = {
+  _read(key, fallback) {
+    try {
+      const value = localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch { return fallback; }
+  },
+  _write(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* private mode */ }
+  },
+  get symbol() { return this._read("katalis.symbol", "BBCA.JK"); },
+  set symbol(value) { this._write("katalis.symbol", value); },
+  get auto() { return this._read("katalis.auto", "0") === "1"; },
+  set auto(value) { this._write("katalis.auto", value ? "1" : "0"); },
+  get ai() { return this._read("katalis.ai", "1") === "1"; },
+  set ai(value) { this._write("katalis.ai", value ? "1" : "0"); },
+};
+
+/* ---------- formatting ---------- */
+
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const rp = (n) => (n == null || Number.isNaN(n) ? "—" :
+  Number(n).toLocaleString("id-ID", { maximumFractionDigits: 0 }));
+
+const num = (n, d = 2) => (n == null || Number.isNaN(n) ? "—" :
+  Number(n).toLocaleString("id-ID", { minimumFractionDigits: d, maximumFractionDigits: d }));
+
+const pct = (n, d = 2) => (n == null || Number.isNaN(n) ? "—" :
+  `${n > 0 ? "+" : ""}${Number(n).toLocaleString("id-ID", { minimumFractionDigits: d, maximumFractionDigits: d })}%`);
+
+const tone = (n) => (n == null ? "flat" : n > 0 ? "up" : n < 0 ? "down" : "flat");
+const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+/* ---------- api ---------- */
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+function toast(message, isError = false) {
+  let node = $(".toast");
+  if (!node) {
+    node = document.createElement("div");
+    node.className = "toast";
+    document.body.appendChild(node);
+  }
+  node.textContent = message;
+  node.classList.toggle("err", isError);
+  node.classList.add("show");
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => node.classList.remove("show"), 3800);
+}
+
+function normaliseSymbol(raw) {
+  const value = String(raw || "").trim().toUpperCase();
+  if (!value) return "";
+  if (/^[A-Z]{4}$/.test(value)) return `${value}.JK`;
+  return value;
+}
+
+/* ---------- boot ---------- */
+
+async function boot() {
+  wireEvents();
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  try {
+    state.health = await api("/api/health");
+    paintHealth();
+  } catch (error) {
+    toast(`Server tidak menjawab: ${error.message}`, true);
+  }
+
+  state.symbol = normaliseSymbol(prefs.symbol);
+  $("#symbol").value = state.symbol;
+  $("#opt-ai").checked = prefs.ai;
+  $("#opt-auto").checked = prefs.auto;
+
+  await Promise.all([loadWatchlist(), loadBenchmark(), loadPortfolio()]);
+
+  // The watchlist has no stream of its own: one poll every 30 seconds keeps
+  // eight cards current, and the server caches each symbol for 30 seconds.
+  setInterval(loadWatchlist, 30000);
+  setInterval(loadBenchmark, 60000);
+  window.addEventListener("beforeunload", stopLive);
+
+  // Opening the dashboard used to run a full analysis, which — once the model
+  // was connected — meant one paid call per refresh, for a symbol nobody asked
+  // about. It now loads prices only; the desk runs on the button, or on open
+  // when the operator ticks "otomatis".
+  await openSymbol(state.symbol, { analyse: prefs.auto });
+}
+
+function tickClock() {
+  const now = new Date();
+  $("#clock").textContent = now.toLocaleString("id-ID", {
+    timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }) + " WIB";
+  paintStamp();
+}
+
+function paintHealth() {
+  const health = state.health;
+  if (!health) return;
+  const mode = $("#chip-mode");
+  mode.textContent = "live · yahoo";
+  mode.className = "chip chip-live";
+  const idx = $("#chip-idx");
+  if (health.idx && health.idx.available) {
+    idx.textContent = `idx ${health.idx.version || ""}`.trim();
+    idx.className = "chip chip-warn";
+    idx.title = health.idx.path;
+  } else {
+    idx.textContent = "idx · mode proksi";
+    idx.className = "chip";
+    idx.title = health.idx?.hint || "Biner idx tidak ditemukan; peran data IDX memakai proksi harga.";
+  }
+  const ai = $("#chip-ai");
+  if (ai) {
+    if (health.llm && health.llm.configured) {
+      ai.textContent = `AI · ${health.llm.model}`;
+      ai.className = "chip chip-warn";
+      const warn = (health.llm.warnings || [])[0];
+      ai.title = warn || `${health.llm.endpoint} — lapisan penasihat aktif`;
+      if (warn) ai.textContent = `AI · ${health.llm.model} ⚠`;
+    } else {
+      ai.textContent = "AI · mati";
+      ai.className = "chip";
+      const warn = (health.llm?.warnings || [])[0];
+      ai.title = warn || health.llm?.hint || "Isi OPENAI_API_KEY untuk mengaktifkan penasihat AI.";
+    }
+  }
+}
+
+async function refreshHealth() {
+  try {
+    state.health = await api("/api/health");
+    paintHealth();
+    return state.health;
+  } catch {
+    return state.health;
+  }
+}
+
+function diagnosticsBlock() {
+  const info = state.health?.llm?.diagnostics;
+  if (!info) return "";
+  const rows = [
+    ["Berkas .env", info.env_exists ? "ditemukan" : "tidak ditemukan"],
+    ["Baris OPENAI_API_KEY", info.key_in_file ? "ada" : "tidak ada"],
+    ["Panjang kunci", info.key_length ? `${info.key_length} karakter` : "kosong"],
+    ["Model", info.model],
+    ["Endpoint", info.endpoint],
+  ];
+  const warnings = (info.warnings || []).map((item) => `<li>${esc(item)}</li>`).join("");
+  return `<div class="diag">
+    <table>${rows.map(([key, value]) =>
+      `<tr><th>${esc(key)}</th><td>${esc(value)}</td></tr>`).join("")}</table>
+    ${warnings ? `<ul class="diag-warn">${warnings}</ul>` : ""}
+    <button class="primary" id="reload-ai" style="margin-top:12px">Periksa ulang .env</button>
+  </div>`;
+}
+
+/* ---------- watchlist ---------- */
+
+function bindWatchRows() {
+  $$(".wrow", $("#watchlist")).forEach((row) => row.addEventListener("click", () => {
+    openSymbol(row.dataset.symbol);
+  }));
+}
+
+async function loadWatchlist() {
+  const body = $("#watchlist");
+  if (!state.watch) body.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const previous = state.watch?.quotes || [];
+    const payload = await api("/api/watchlist");
+    state.watch = payload;
+    body.innerHTML = payload.quotes.map(watchRow).join("") || '<p class="muted pad">Watchlist kosong.</p>';
+    bindWatchRows();
+    paintQuick(payload.symbols);
+    flashChanged(previous, payload.quotes);
+  } catch (error) {
+    if (!state.watch) body.innerHTML = `<p class="muted pad">Gagal memuat: ${esc(error.message)}</p>`;
+  }
+}
+
+/* Rows whose price moved since the last poll get a brief tint — the reason the
+   card is worth watching without a refresh. */
+function flashChanged(before, after) {
+  const seen = new Map((before || []).map((quote) => [quote.symbol, quote.price]));
+  (after || []).forEach((quote) => {
+    const previous = seen.get(quote.symbol);
+    if (previous == null || quote.price == null || quote.price === previous) return;
+    const row = document.querySelector(`.wrow[data-symbol="${CSS.escape(quote.symbol)}"]`);
+    if (row) flash(row, quote.price > previous);
+  });
+}
+
+function sparkline(values) {
+  if (!values || values.length < 2) return "";
+  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+  const points = values.map((v, i) =>
+    `${(i / (values.length - 1) * 100).toFixed(2)},${(18 - (v - min) / span * 16).toFixed(2)}`).join(" ");
+  const colour = values[values.length - 1] >= values[0] ? "#22c55e" : "#ef4444";
+  return `<svg viewBox="0 0 100 20" preserveAspectRatio="none"><polyline points="${points}"
+          fill="none" stroke="${colour}" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function watchRow(quote) {
+  if (quote.error) {
+    return `<div class="wrow" data-symbol="${esc(quote.symbol)}">
+      <div><div class="sym">${esc(quote.symbol)}</div><div class="nm">tidak tersedia</div></div>
+      <div class="chg flat">—</div></div>`;
+  }
+  const on = quote.symbol === state.symbol ? " on" : "";
+  return `<div class="wrow${on}" data-symbol="${esc(quote.symbol)}">
+    <div><div class="sym">${esc(quote.symbol.replace(".JK", ""))}</div>
+         <div class="nm">${esc(quote.name || "")}</div></div>
+    <div><div class="px">${rp(quote.price)}</div>
+         <div class="chg ${tone(quote.change_pct)}">${pct(quote.change_pct)}</div></div>
+    ${sparkline(quote.spark)}
+  </div>`;
+}
+
+function paintQuick(symbols) {
+  $("#quick").innerHTML = symbols.slice(0, 8).map((symbol) =>
+    `<button data-symbol="${esc(symbol)}">${esc(symbol.replace(".JK", ""))}</button>`).join("");
+  $$("#quick button").forEach((button) => button.addEventListener("click", () =>
+    openSymbol(button.dataset.symbol)));
+}
+
+/* ---------- market ---------- */
+
+async function loadBenchmark() {
+  try {
+    const payload = await api("/api/benchmark");
+    const indicators = payload.indicators || {};
+    $("#ihsg-price").textContent = rp(payload.price);
+    const change = indicators.change_pct ?? 0;
+    const node = $("#ihsg-chg");
+    node.textContent = pct(change);
+    node.className = tone(change);
+  } catch { /* the index is decoration; the page works without it */ }
+}
+
+async function openSymbol(symbol, { analyse = false } = {}) {
+  state.symbol = normaliseSymbol(symbol);
+  prefs.symbol = state.symbol;
+  $("#symbol").value = state.symbol;
+  $$(".wrow").forEach((row) => row.classList.toggle("on", row.dataset.symbol === state.symbol));
+  startLive(state.symbol);        // the stream starts first: a live price often lands before the chart
+  await loadMarket(state.symbol, state.range);
+  if (analyse) {
+    await runAnalysis();
+  } else {
+    // Selecting a symbol costs nothing; running the desk is a separate click.
+    paintIdleVerdict();
+  }
+}
+
+async function loadMarket(symbol, range, { fresh = false } = {}) {
+  if (!state.bars.length) $("#chart").innerHTML = '<div class="skeleton tall"></div>';
+  try {
+    const payload = await api(
+      `/api/market?symbol=${encodeURIComponent(symbol)}&range=${range}${fresh ? "&fresh=1" : ""}`);
+    paintChart(payload);
+  } catch (error) {
+    $("#chart").innerHTML = `<p class="muted pad">${esc(error.message)}</p>`;
+  }
+}
+
+function paintChart(payload) {
+  state.chart = payload;
+  state.bars = (payload.bars || []).map((bar) => ({ ...bar }));
+  state.lastFetch = Date.now();
+
+  const indicators = payload.indicators || {};
+  $("#chart-title").textContent = payload.symbol || state.symbol;
+  const basis = payload.interval && payload.interval !== "1d" ? ` · bar ${payload.interval}` : "";
+  $("#chart-sub").textContent =
+    [payload.name, payload.exchange, payload.currency].filter(Boolean).join(" · ") + basis;
+
+  paintLiveHead();
+  paintChartSvg();
+  paintMetrics(indicators);
+  paintStamp();
+}
+
+function paintLiveHead() {
+  const live = state.live;
+  const price = live?.price ?? state.chart?.price;
+  const change = live?.change_pct ?? state.chart?.indicators?.change_pct;
+  const node = $("#chart-price");
+  if (!node) return;
+  node.textContent = rp(price);
+  node.className = `chart-price ${tone(change)}`;
+  const badge = $("#chart-chg");
+  if (badge) {
+    badge.textContent = pct(change);
+    badge.className = `chart-chg ${tone(change)}`;
+  }
+}
+
+function paintChartSvg() {
+  $("#chart").innerHTML = renderCandles(state.bars, {
+    prevClose: state.live?.prev_close ?? state.chart?.prev_close,
+    interval: state.chart?.interval,
+    timezone: state.chart?.timezone,
+  });
+  const svg = $("#chart svg");
+  if (!svg) return;
+  attachHover(svg);
+  // A tick re-renders the chart every few seconds; the crosshair the cursor is
+  // holding must survive that, so it is redrawn from the last position.
+  if (state.hoverIndex != null) showCross(svg, state.hoverIndex, state.hoverY);
+}
+
+function paintMetrics(indicators) {
+  const ind = indicators || {};
+  const tiles = [
+    ["Terakhir", rp(ind.last), tone(ind.change_pct)],
+    ["Perubahan", pct(ind.change_pct), tone(ind.change_pct)],
+    ["RSI 14", num(ind.rsi14, 1), ""],
+    ["MACD hist", num(ind.macd_hist, 1), tone(ind.macd_hist)],
+    ["ATR", `${num(ind.atr_pct, 2)}%`, ""],
+    ["Vol 20h", rp(ind.vol_avg20), ""],
+    ["Posisi 52m", ind.pos_52w == null ? "—" : `${Math.round(ind.pos_52w * 100)}%`, ""],
+    ["Drawdown", `${num(ind.max_drawdown_pct, 1)}%`, "down"],
+  ];
+  $("#metrics").innerHTML = tiles.map(([key, value, cls]) =>
+    `<div class="metric"><div class="k">${key}</div><div class="v ${cls}">${value}</div></div>`).join("");
+}
+
+function paintStamp() {
+  const node = $("#chart-stamp");
+  if (!node) return;
+  const live = state.live;
+  const seconds = state.lastFetch ? Math.max(0, Math.round((Date.now() - state.lastFetch) / 1000)) : null;
+  const parts = [];
+  if (state.stream) parts.push('<span class="pulse"></span>streaming 5 detik');
+  if (seconds != null) parts.push(`chart ${seconds}s lalu`);
+  if (live?.age != null) parts.push(`tick ${live.age}s`);
+  if (state.chart?.cached) parts.push("dari cache");
+  node.innerHTML = parts.join(" · ");
+}
+
+/* ---------- live stream ---------- */
+
+function setLiveBadge(connected) {
+  const node = $("#chart-live");
+  if (!node) return;
+  node.classList.toggle("on", Boolean(connected));
+  node.textContent = connected ? "LIVE" : "terputus";
+}
+
+function startLive(symbol) {
+  stopLive();
+  state.live = null;
+  setLiveBadge(false);
+
+  if (typeof EventSource === "undefined") {
+    // Older browser: poll instead. Same handler, same UI.
+    const tick = async () => {
+      try {
+        const payload = await api(`/api/tick?symbol=${encodeURIComponent(symbol)}`);
+        setLiveBadge(true);
+        applyTick(payload);
+      } catch { setLiveBadge(false); }
+      state.poll = setTimeout(tick, 8000);
+    };
+    tick();
+    return;
+  }
+
+  const source = new EventSource(`/api/stream?symbol=${encodeURIComponent(symbol)}`);
+  state.stream = source;
+  source.onopen = () => setLiveBadge(true);
+  source.onerror = () => setLiveBadge(false);      // EventSource reconnects on its own
+  source.onmessage = (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    if (payload.error) { setLiveBadge(false); return; }
+    setLiveBadge(true);
+    applyTick(payload);
+  };
+}
+
+function stopLive() {
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  if (state.poll) { clearTimeout(state.poll); state.poll = null; }
+}
+
+function flash(node, up) {
+  if (!node) return;
+  const cls = up ? "flash-up" : "flash-down";
+  node.classList.remove("flash-up", "flash-down");
+  void node.offsetWidth;                            // restart the animation
+  node.classList.add(cls);
+}
+
+function applyTick(tick) {
+  if (!tick || tick.symbol !== state.symbol) return;
+  const previous = state.live?.price ?? state.chart?.price;
+  state.live = tick;
+
+  const node = $("#chart-price");
+  paintLiveHead();
+  if (previous != null && tick.price != null && tick.price !== previous) {
+    flash(node, tick.price > previous);
+  }
+
+  // Keep the last candle honest: today's close, and the extremes the price has
+  // touched since the bar opened. A 5-minute bar from the tick can also be a
+  // new bar the chart does not have yet.
+  if (state.bars.length && tick.price != null) {
+    const last = state.bars[state.bars.length - 1];
+    last.c = tick.price;
+    last.h = Math.max(last.h, tick.price);
+    last.l = Math.min(last.l, tick.price);
+    if (state.chart?.interval && state.chart.interval !== "1d" && tick.bar && tick.bar.t > last.t) {
+      state.bars.push({ ...tick.bar });
+      state.bars = state.bars.slice(-400);
+    }
+    paintChartSvg();
+  }
+
+  // The watchlist card shows the same instrument; keep it in step.
+  const row = document.querySelector(`.wrow[data-symbol="${CSS.escape(tick.symbol)}"]`);
+  if (row) {
+    const priceNode = row.querySelector(".px");
+    const changeNode = row.querySelector(".chg");
+    if (priceNode) { priceNode.textContent = rp(tick.price); flash(priceNode, tick.change_pct >= 0); }
+    if (changeNode) {
+      changeNode.textContent = pct(tick.change_pct);
+      changeNode.className = `chg ${tone(tick.change_pct)}`;
+    }
+  }
+  paintStamp();
+}
+
+function renderCandles(bars, options = {}) {
+  if (!bars || !bars.length) return '<p class="muted pad">Tidak ada bar.</p>';
+  const W = 900, H = 344, left = 8, right = 64, top = 14, bottom = 30;
+  const priceH = 212, gap = 18, volH = H - top - bottom - priceH - gap;
+  const plotW = W - left - right;
+  const high = Math.max(...bars.map((b) => b.h));
+  const low = Math.min(...bars.map((b) => b.l));
+  const span = high - low || 1;
+  const yPrice = (v) => top + (high - v) / span * priceH;
+  const maxVol = Math.max(...bars.map((b) => b.v), 1);
+  const step = plotW / bars.length;
+  const bodyW = Math.max(1.4, step * 0.62);
+  const parts = [];
+
+  for (let i = 0; i <= 4; i += 1) {
+    const value = low + span * (i / 4), y = yPrice(value).toFixed(1);
+    parts.push(`<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#1a2836" stroke-width="1"/>`);
+    parts.push(`<text x="${left + plotW + 6}" y="${Number(y) + 3.5}" fill="#8fa3b3" font-size="10"
+                font-family="ui-monospace, monospace">${rp(value)}</text>`);
+  }
+
+  // Yesterday's close: the line an intraday move is judged against.
+  const previous = options.prevClose;
+  if (previous && previous >= low && previous <= high) {
+    const y = yPrice(previous).toFixed(1);
+    parts.push(`<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#64748b"
+                stroke-width="1" stroke-dasharray="2 4"/>`);
+    parts.push(`<text x="${left + 4}" y="${Number(y) - 4}" fill="#64748b" font-size="9.5"
+                font-family="ui-monospace, monospace">penutupan sebelumnya ${rp(previous)}</text>`);
+  }
+
+  bars.forEach((bar, index) => {
+    const x = left + index * step + (step - bodyW) / 2;
+    const up = bar.c >= bar.o;
+    const colour = up ? "#22c55e" : "#ef4444";
+    const yHigh = yPrice(bar.h), yLow = yPrice(bar.l);
+    const yOpen = yPrice(bar.o), yClose = yPrice(bar.c);
+    parts.push(`<line x1="${(x + bodyW / 2).toFixed(1)}" y1="${yHigh.toFixed(1)}"
+                x2="${(x + bodyW / 2).toFixed(1)}" y2="${yLow.toFixed(1)}" stroke="${colour}" stroke-width="1"/>`);
+    const y = Math.min(yOpen, yClose), height = Math.max(1, Math.abs(yClose - yOpen));
+    parts.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bodyW.toFixed(1)}"
+                height="${height.toFixed(1)}" fill="${colour}" fill-opacity="0.9"/>`);
+    const volY = top + priceH + gap + (volH - bar.v / maxVol * volH);
+    parts.push(`<rect x="${x.toFixed(1)}" y="${volY.toFixed(1)}" width="${bodyW.toFixed(1)}"
+                height="${(bar.v / maxVol * volH).toFixed(1)}" fill="${colour}" fill-opacity="0.28"/>`);
+  });
+
+  if (bars.length >= 20) {
+    const points = [];
+    for (let i = 19; i < bars.length; i += 1) {
+      const slice = bars.slice(i - 19, i + 1);
+      const average = slice.reduce((sum, bar) => sum + bar.c, 0) / slice.length;
+      points.push(`${(left + i * step + step / 2).toFixed(1)},${yPrice(average).toFixed(1)}`);
+    }
+    parts.push(`<polyline points="${points.join(" ")}" fill="none" stroke="#f0b429" stroke-width="1.3"
+                stroke-opacity="0.85"/>`);
+  }
+
+  const last = bars[bars.length - 1];
+  const lastY = yPrice(last.c);
+  parts.push(`<line x1="${left}" y1="${lastY.toFixed(1)}" x2="${left + plotW}" y2="${lastY.toFixed(1)}"
+              stroke="#f0b429" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.6"/>`);
+  parts.push(`<circle cx="${(left + plotW - 2).toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.2" fill="#f0b429">
+                <animate attributeName="r" values="3;5.4;3" dur="1.8s" repeatCount="indefinite"/>
+                <animate attributeName="opacity" values="1;0.35;1" dur="1.8s" repeatCount="indefinite"/>
+              </circle>`);
+  parts.push(`<rect x="${left + plotW + 2}" y="${(lastY - 8).toFixed(1)}" width="58" height="16" rx="3"
+              fill="#f0b429"/>`);
+  parts.push(`<text x="${left + plotW + 31}" y="${(lastY + 4).toFixed(1)}" text-anchor="middle"
+              fill="#241a02" font-size="10" font-weight="700"
+              font-family="ui-monospace, monospace">${rp(last.c)}</text>`);
+
+  // A time axis. Without it the chart was a wall of candles with no reference.
+  const marks = [0, 0.25, 0.5, 0.75, 1];
+  marks.forEach((fraction, position) => {
+    const index = Math.min(bars.length - 1, Math.round(fraction * (bars.length - 1)));
+    const x = left + index * step + step / 2;
+    const anchor = position === 0 ? "start" : position === marks.length - 1 ? "end" : "middle";
+    parts.push(`<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" fill="#6f8494"
+                font-size="9.5" font-family="ui-monospace, monospace">${esc(
+                  axisLabel(bars[index].t, options.interval, options.timezone))}</text>`);
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="grafik harga"
+      data-left="${left}" data-top="${top}" data-plotw="${plotW.toFixed(2)}"
+      data-priceh="${priceH}" data-step="${step.toFixed(3)}"
+      data-high="${high}" data-low="${low}" data-count="${bars.length}">${parts.join("")}
+    <g id="xk-cross" pointer-events="none" style="display:none">
+      <rect class="xk-col" x="0" y="${top}" width="${step.toFixed(2)}" height="${priceH}"
+            fill="#e8eff5" opacity="0.055"/>
+      <line class="xk-v" x1="0" y1="${top}" x2="0" y2="${top + priceH}" stroke="#8fa3b3"
+            stroke-width="1" stroke-dasharray="3 3" opacity="0.8"/>
+      <line class="xk-h" x1="${left}" y1="0" x2="${left + plotW}" y2="0" stroke="#8fa3b3"
+            stroke-width="1" stroke-dasharray="3 3" opacity="0.8"/>
+      <circle class="xk-dot" cx="0" cy="0" r="3.2" fill="#f0b429" stroke="#0a0e13" stroke-width="1"/>
+      <rect class="xk-ybox" x="${left + plotW + 2}" y="0" width="58" height="16" rx="3" fill="#22323f"/>
+      <text class="xk-ytext" x="${left + plotW + 31}" y="0" text-anchor="middle" fill="#e8eff5"
+            font-size="10" font-family="ui-monospace, monospace"></text>
+    </g>
+  </svg>`;
+}
+
+/* ---------- crosshair ---------- */
+
+function toLocal(svg, clientX, clientY) {
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return null;
+  const point = svg.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  return point.matrixTransform(matrix.inverse());
+}
+
+function attachHover(svg) {
+  const move = (event) => {
+    const source = event.touches ? event.touches[0] : event;
+    if (!source) return;
+    const local = toLocal(svg, source.clientX, source.clientY);
+    if (!local) return;
+    const data = svg.dataset;
+    const step = Number(data.step) || 1;
+    const index = Math.round((local.x - Number(data.left) - step / 2) / step);
+    state.hoverIndex = index;
+    state.hoverY = local.y;
+    showCross(svg, index, local.y);
+  };
+  const leave = () => {
+    state.hoverIndex = null;
+    state.hoverY = null;
+    hideCross(svg);
+  };
+  svg.addEventListener("mousemove", move);
+  svg.addEventListener("mouseleave", leave);
+  svg.addEventListener("touchstart", move, { passive: true });
+  svg.addEventListener("touchmove", move, { passive: true });
+  svg.addEventListener("touchend", leave);
+}
+
+function showCross(svg, index, localY) {
+  const cross = svg.querySelector("#xk-cross");
+  if (!cross) return;
+  const count = state.bars.length;
+  if (!count) return hideCross(svg);
+
+  // The pointer can sit in the right-hand price margin, past the last candle.
+  // Clamping keeps the readout on the edge instead of hiding it.
+  const at = Math.max(0, Math.min(count - 1, Number.isFinite(index) ? Math.trunc(index) : 0));
+  const bar = state.bars[at];
+
+  const data = svg.dataset;
+  const left = Number(data.left), top = Number(data.top), plotW = Number(data.plotw);
+  const priceH = Number(data.priceh), step = Number(data.step);
+  const high = Number(data.high), low = Number(data.low);
+  const span = (high - low) || 1;
+  const yOf = (value) => top + (high - value) / span * priceH;
+
+  const centre = left + at * step + step / 2;
+  const y = Math.max(top, Math.min(top + priceH, Number.isFinite(localY) ? localY : yOf(bar.c)));
+
+  cross.style.display = "";
+  const column = cross.querySelector(".xk-col");
+  column.setAttribute("x", (left + at * step).toFixed(2));
+  column.setAttribute("width", Math.max(1, step).toFixed(2));
+
+  const vertical = cross.querySelector(".xk-v");
+  vertical.setAttribute("x1", centre.toFixed(2));
+  vertical.setAttribute("x2", centre.toFixed(2));
+
+  const horizontal = cross.querySelector(".xk-h");
+  horizontal.setAttribute("y1", y.toFixed(2));
+  horizontal.setAttribute("y2", y.toFixed(2));
+
+  const dot = cross.querySelector(".xk-dot");
+  dot.setAttribute("cx", centre.toFixed(2));
+  dot.setAttribute("cy", yOf(bar.c).toFixed(2));
+
+  const price = high - (y - top) / priceH * span;
+  cross.querySelector(".xk-ybox").setAttribute("y", (y - 8).toFixed(2));
+  const label = cross.querySelector(".xk-ytext");
+  label.setAttribute("y", (y + 3.6).toFixed(2));
+  label.textContent = rp(price);
+
+  showTip(svg, at, centre, yOf(bar.c));
+}
+
+function showTip(svg, index, localX, localY) {
+  const host = $("#chart");
+  if (!host) return;
+  let tip = $("#xk-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "xk-tip";
+    tip.className = "xk-tip";
+    host.appendChild(tip);
+  }
+
+  const bar = state.bars[index];
+  const previous = index > 0 ? state.bars[index - 1].c : bar.o;
+  const change = previous ? (bar.c / previous - 1) * 100 : null;
+  const style = tone(change);
+  tip.innerHTML = `
+    <div class="xk-when">${esc(fullLabel(bar.t, state.chart?.interval, state.chart?.timezone))}</div>
+    <div class="xk-ohlc">
+      <span>O</span><b>${rp(bar.o)}</b>
+      <span>H</span><b class="up">${rp(bar.h)}</b>
+      <span>L</span><b class="down">${rp(bar.l)}</b>
+      <span>C</span><b class="${style}">${rp(bar.c)}</b>
+    </div>
+    <div class="xk-meta">
+      <span class="${style}">${pct(change)}</span>
+      <span class="muted">vol ${rp(bar.v)}</span>
+    </div>`;
+  tip.style.display = "block";
+
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return;
+  const point = svg.createSVGPoint();
+  point.x = localX;
+  point.y = localY;
+  const screen = point.matrixTransform(matrix);
+  const bounds = host.getBoundingClientRect();
+  const x = screen.x - bounds.left;
+  const y = screen.y - bounds.top;
+  const width = tip.offsetWidth || 180;
+  const left = x + 16 + width > bounds.width ? x - width - 16 : x + 16;
+  tip.style.left = `${Math.max(4, left)}px`;
+  tip.style.top = `${Math.max(4, Math.min(bounds.height - 90, y - 48))}px`;
+}
+
+function hideCross(svg) {
+  const cross = svg.querySelector("#xk-cross");
+  if (cross) cross.style.display = "none";
+  const tip = $("#xk-tip");
+  if (tip) tip.style.display = "none";
+}
+
+function fullLabel(stamp, interval, timeZone) {
+  const date = new Date(stamp * 1000);
+  const intraday = interval && interval !== "1d";
+  try {
+    const day = date.toLocaleDateString("id-ID",
+      { timeZone: intraday ? timeZone : "UTC", day: "2-digit", month: "short", year: "numeric" });
+    if (!intraday) return day;
+    const time = date.toLocaleTimeString("id-ID",
+      { timeZone, hour: "2-digit", minute: "2-digit" });
+    return `${day} · ${time}`;
+  } catch {
+    return date.toISOString().slice(0, intraday ? 16 : 10).replace("T", " · ");
+  }
+}
+
+function axisLabel(stamp, interval, timeZone) {
+  const date = new Date(stamp * 1000);
+  const intraday = interval && interval !== "1d";
+  try {
+    return intraday
+      ? date.toLocaleTimeString("id-ID", { timeZone, hour: "2-digit", minute: "2-digit" })
+      : date.toLocaleDateString("id-ID", { timeZone: "UTC", day: "2-digit", month: "short" });
+  } catch {
+    // A timezone name the browser does not know must not blank the axis.
+    return intraday ? date.toISOString().slice(11, 16) : date.toISOString().slice(5, 10);
+  }
+}
+
+/* ---------- analysis ---------- */
+
+async function runAnalysis() {
+  const button = $("#analyse");
+  button.disabled = true;
+  button.textContent = "Menganalisis…";
+  try {
+    const payload = await api("/api/analyze", {
+      method: "POST",
+      body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
+    });
+    state.analysis = payload;
+    paintVerdict(payload);
+    paintPanel(state.tab);
+    if (payload.recorded) toast(`Keputusan tersimpan di jurnal (#${payload.recorded}).`);
+  } catch (error) {
+    toast(`Analisis gagal: ${error.message}`, true);
+    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Analisis";
+  }
+}
+
+function viewIdle() {
+  const costs = prefs.ai && state.health?.llm?.configured;
+  return `<div class="empty">
+    <span class="empty-mark">◎</span>
+    <p><strong>${esc(state.symbol)}</strong> siap dianalisis.</p>
+    <p class="muted">Harga dan indikator sudah dimuat — ini tidak memakai biaya.
+    Tekan <strong>Analisis</strong> untuk menjalankan lima peran${costs ? " dan satu panggilan model" : ""}.</p>
+  </div>`;
+}
+
+function paintIdleVerdict() {
+  $("#verdict").innerHTML = viewIdle();
+}
+
+function paintVerdict(data) {  const decision = data.decision || {};
+  const plan = data.trader || {};
+  const budget = plan.value ? `Rp${rp(plan.value)}` : "—";
+  const lots = plan.lots == null ? "—" : `${rp(plan.lots)} lot`;
+  const sources = [
+    ["yahoo", "Yahoo Finance"],
+    data.sources?.idx?.available ? ["idx", "idx CLI"] : ["proxy", "proksi harga"],
+  ];
+
+  $("#verdict").innerHTML = `
+    <div class="rating-wrap">
+      <span class="rating-pill rating-${esc(decision.rating)}">${esc(decision.rating || "—")}</span>
+      <div class="rating-price">${rp(data.price)}</div>
+      <div class="rating-name">${esc(data.name || "")} · ${esc(data.symbol)} · per ${esc(data.as_of)}</div>
+    </div>
+    <div class="confidence">
+      <div class="row"><span>Keyakinan</span><span>${Math.round((decision.confidence || 0) * 100)}%</span></div>
+      <div class="bar"><i class="fill" style="width:${clamp01(decision.confidence || 0) * 100}%"></i></div>
+    </div>
+    <div class="plan">
+      <div><div class="k">Entry</div><div class="v">${rp(plan.entry)}</div></div>
+      <div><div class="k">Stop</div><div class="v down">${rp(plan.stop)}</div></div>
+      <div><div class="k">Target</div><div class="v up">${rp(plan.target)}</div></div>
+      <div><div class="k">R : R</div><div class="v">${plan.reward_risk ?? "—"}</div></div>
+      <div><div class="k">Ukuran</div><div class="v">${lots}</div></div>
+      <div><div class="k">Nilai</div><div class="v">${budget}</div></div>
+      ${plan.lots == null ? `<div style="grid-column:1/-1"><div class="k">Catatan</div>
+        <div style="font-size:12px;color:#c3d2df;margin-top:2px">${esc(plan.note || "")}</div></div>` : ""}
+    </div>
+    <div class="verdict-note">
+      ${esc(decision.summary || "")}
+      <div class="src">
+        ${sources.map(([kind, label]) => `<span class="tag ${kind}">${esc(label)}</span>`).join("")}
+        <span class="tag">${data.recorded ? `jurnal #${data.recorded}` : "sudah tercatat hari ini"}</span>
+      </div>
+    </div>
+    ${aiStrip(data)}`;
+}
+
+function aiStrip(data) {  const ai = data.ai;
+  if (!ai) {
+    return data.ai_error
+      ? `<div class="ai-strip"><span class="tag">AI gagal</span>
+         <span class="muted">${esc(data.ai_error)}</span></div>`
+      : `<div class="ai-strip"><span class="tag">AI nonaktif</span>
+         <span class="muted">Isi OPENAI_API_KEY untuk lapisan penasihat.</span></div>`;
+  }
+  const relation = ai.agrees_with_desk
+    ? "sejalan dengan mesin"
+    : `berbeda dari mesin (${esc(ai.mechanical_rating)})`;
+  return `<div class="ai-strip">
+    <span class="rating-pill rating-${esc(ai.rating)}" style="font-size:10px;padding:3px 9px">
+      AI: ${esc(ai.rating)}</span>
+    <span class="muted">${relation} · keyakinan ${Math.round((ai.conviction || 0) * 100)}%</span>
+  </div>`;
+}
+
+/* ---------- panels ---------- */
+
+function paintPanel(tab) {
+  const panel = $("#panel");
+  if (tab === "roles") return void (panel.innerHTML = viewRoles());
+  if (tab === "advice") {
+    panel.innerHTML = viewAdvice();
+    const reload = $("#reload-ai");
+    if (reload) {
+      reload.addEventListener("click", async () => {
+        reload.disabled = true;
+        reload.textContent = "Memeriksa…";
+        const health = await refreshHealth();
+        paintPanel("advice");
+        toast(health?.llm?.configured
+          ? `AI aktif: ${health.llm.model}`
+          : `AI masih mati${health?.llm?.warnings?.[0] ? " — " + health.llm.warnings[0] : ""}`,
+          !health?.llm?.configured);
+      });
+    }
+    return;
+  }
+  if (tab === "debate") return void (panel.innerHTML = viewDebate());
+  if (tab === "risk") return void (panel.innerHTML = viewRisk());
+  if (tab === "journal") return void loadJournal();
+  if (tab === "portfolio") return void loadPortfolio(true);
+}
+
+function needsAnalysis() {
+  return '<p class="muted pad">Jalankan <strong>Analisis</strong> dulu untuk melihat bagian ini.</p>';
+}
+
+function viewRoles() {
+  const data = state.analysis;
+  if (!data) return needsAnalysis();
+  const cards = (data.roles || []).map((role) => {
+    const width = Math.abs(role.score) / 2 * 50;
+    const left = role.score >= 0 ? 50 : 50 - width;
+    const colour = role.score > 0 ? "#22c55e" : role.score < 0 ? "#ef4444" : "#94a3b8";
+    const tagClass = role.source === "idx" ? "idx" : role.source === "proxy" ? "proxy" : "";
+    const tag = role.available
+      ? `<span class="tag ${tagClass}">${role.source === "idx" ? "data idx" : role.source === "proxy" ? "proksi" : "data"}</span>`
+      : '<span class="tag">tanpa data</span>';
+    const list = (items) => items.length
+      ? `<ul>${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : "";
+    return `<article class="role ${role.available ? "" : "off"}">
+      <div class="role-head">
+        <h3>${esc(role.name)}</h3>
+        <div>${tag} <span class="scoreval" style="color:${colour}">${role.score > 0 ? "+" : ""}${num(role.score, 2)}</span></div>
+      </div>
+      <p class="headline">${esc(role.headline)}</p>
+      ${role.warning ? `<p class="muted" style="font-size:11.5px;margin:-4px 0 8px">${esc(role.warning)}</p>` : ""}
+      <div class="scorebar"><i style="left:${left}%;width:${width}%;background:${colour}"></i></div>
+      ${list(role.bull.filter(() => role.stance !== "neutral"))}
+      ${list(role.bear.filter(() => role.stance !== "neutral"))}
+    </article>`;
+  }).join("");
+  return `<div class="role-grid">${cards}</div>`;
+}
+
+function viewDebate() {
+  const data = state.analysis;
+  if (!data) return needsAnalysis();
+  const bull = (data.debate?.bull || []).map((item) => `<li>${esc(item)}</li>`).join("");
+  const bear = (data.debate?.bear || []).map((item) => `<li>${esc(item)}</li>`).join("");
+  return `<div class="two-col">
+    <div class="debate-col bull"><h3>Kasus bullish</h3><ul>${bull}</ul></div>
+    <div class="debate-col bear"><h3>Kasus bearish</h3><ul>${bear}</ul></div>
+  </div>
+  <p class="muted pad">${esc(data.manager?.verdict || "")}</p>`;
+}
+
+function viewRisk() {
+  const data = state.analysis;
+  if (!data) return needsAnalysis();
+  const cards = (data.risk || []).map((item) => `
+    <article class="risk"><h3>${esc(item.name)}</h3>
+      <div class="stance">${esc(item.stance)}</div>
+      <p>${esc(item.note)}</p></article>`).join("");
+  return `<div class="risk-grid">${cards}</div>`;
+}
+
+function paragraphs(text) {
+  return String(text || "")
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => `<p>${esc(part)}</p>`)
+    .join("");
+}
+
+function bulletList(items, empty) {
+  if (!items || !items.length) return `<p class="muted">${esc(empty)}</p>`;
+  return `<ul>${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`;
+}
+
+function viewAdvice() {
+  const data = state.analysis;
+  if (!data) return needsAnalysis();
+  const ai = data.ai;
+
+  if (!ai) {
+    const hint = data.ai_error
+      ? `<p class="muted">Panggilan AI gagal: <strong>${esc(data.ai_error)}</strong></p>`
+      : `<p class="muted">Isi <code>OPENAI_API_KEY</code> di <code>katalis/.env</code>,
+         lalu tekan <em>Periksa ulang .env</em> — berkas itu dibaca ulang tanpa restart.</p>`;
+    return `<div class="advice-empty">
+      <h3>Lapisan penasihat AI belum aktif</h3>
+      ${hint}
+      ${diagnosticsBlock()}
+      <p class="muted" style="margin-top:10px">Angka, indikator, dan rating mesin tetap
+      dihitung tanpa AI — lapisan ini hanya menambah tesis dan risiko, tidak menggantikannya.</p>
+    </div>`;
+  }
+
+  const relation = ai.agrees_with_desk
+    ? `<span class="tag proxy">sejalan dengan mesin</span>`
+    : `<span class="tag idx">beda: mesin ${esc(ai.mechanical_rating)}</span>`;
+  const action = ai.action || {};
+  const level = (label, value) => `<div><div class="k">${label}</div>
+    <div class="v">${value == null ? "—" : rp(value)}</div></div>`;
+
+  return `
+    <div class="advice-head">
+      <span class="rating-pill rating-${esc(ai.rating)}">${esc(ai.rating)}</span>
+      <span class="tag">${esc(ai.model || "AI")}</span>
+      <span class="tag">keyakinan ${Math.round((ai.conviction || 0) * 100)}%</span>
+      ${ai.usage?.total_tokens ? `<span class="tag">${rp(ai.usage.total_tokens)} token</span>` : ""}
+      ${relation}
+    </div>
+    <div class="two-col advice-grid">
+      <article class="advice-block">
+        <h3>Tesis</h3>
+        ${paragraphs(ai.thesis) || '<p class="muted">Model tidak menulis tesis.</p>'}
+        ${ai.confidence_note ? `<p class="muted" style="margin-top:10px">${esc(ai.confidence_note)}</p>` : ""}
+      </article>
+      <div class="advice-side">
+        <article class="advice-block">
+          <h3>Risiko</h3>
+          ${bulletList(ai.risks, "Model tidak menyebut risiko.")}
+        </article>
+        <article class="advice-block">
+          <h3>Yang membatalkan tesis</h3>
+          ${bulletList(ai.what_would_change, "Tidak disebutkan.")}
+        </article>
+        <article class="advice-block">
+          <h3>Rencana AI</h3>
+          <div class="plan" style="margin-top:0">
+            ${level("Entry", action.entry)}
+            ${level("Stop", action.stop)}
+            ${level("Target", action.target)}
+          </div>
+          ${action.sizing_note ? `<p class="muted" style="margin-top:8px">${esc(action.sizing_note)}</p>` : ""}
+        </article>
+      </div>
+    </div>
+    <p class="advice-foot">${esc(ai.disclaimer || "")} · dibuat ${esc(ai.generated_at || "")}</p>`;
+}
+
+/* ---------- journal ---------- */
+
+function statCards(scores) {
+  return Object.entries(scores || {}).map(([rating, value]) => `
+    <div class="stat"><div class="k">${esc(rating)}</div>
+      <div class="v">${value.count} <span class="muted" style="font-size:12px">· ${value.hit_rate == null ? "tanpa arah" : `${Math.round(value.hit_rate * 100)}% tepat`}</span></div>
+      <div class="muted" style="font-size:12px">rata-rata alpha ${pct(value.mean_alpha * 100)}</div></div>`).join("");
+}
+
+async function loadJournal() {
+  const panel = $("#panel");
+  panel.innerHTML = '<p class="muted pad">Memuat jurnal…</p>';
+  try {
+    const payload = await api("/api/journal");
+    state.journal = payload;
+    const stats = payload.stats || {};
+    const pill = (rating) => `<span class="rating-pill rating-${esc(rating)}"
+        style="font-size:10px;padding:3px 9px">${esc(rating)}</span>`;
+    const rows = (payload.entries || []).map((entry) => `
+      <tr>
+        <td class="num">${esc(entry.trade_date)}</td>
+        <td>${esc(entry.symbol.replace(".JK", ""))}</td>
+        <td>${pill(entry.rating)}</td>
+        <td>${entry.ai_rating ? pill(entry.ai_rating) : '<span class="muted">—</span>'}</td>
+        <td class="num">${rp(entry.price)}</td>
+        <td class="num">${entry.exit_price == null ? "—" : rp(entry.exit_price)}</td>
+        <td class="num ${tone(entry.raw_return)}">${entry.raw_return == null ? "—" : pct(entry.raw_return * 100)}</td>
+        <td class="num ${tone(entry.benchmark_return)}">${entry.benchmark_return == null ? "—" : pct(entry.benchmark_return * 100)}</td>
+        <td class="num ${tone(entry.alpha)}">${entry.alpha == null ? "—" : pct(entry.alpha * 100)}</td>
+        <td>${entry.settled ? "dinilai" : "menunggu"}</td>
+      </tr>`).join("");
+
+    panel.innerHTML = `
+      <div class="toolbar">
+        <button class="primary" id="settle">Nilai keputusan yang jatuh tempo</button>
+        <span class="muted">${stats.settled || 0} dinilai · ${stats.pending || 0} menunggu
+          ${stats.ai_settled ? `· ${stats.ai_settled} punya rating AI` : ""}</span>
+      </div>
+      ${Object.keys(stats.by_rating || {}).length ? `<div class="statgrid">${statCards(stats.by_rating)}</div>` : ""}
+      ${stats.ai_settled ? `<div class="group-label">Rekam jejak AI</div>
+        <div class="statgrid">${statCards(stats.by_rating_ai)}</div>` : ""}
+      <table>
+        <thead><tr><th>Tanggal</th><th>Kode</th><th>Mesin</th><th>AI</th><th class="num">Harga</th>
+        <th class="num">Keluar</th><th class="num">Return</th><th class="num">IHSG</th>
+        <th class="num">Alpha</th><th>Status</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="10" class="muted">Belum ada keputusan. Jalankan analisis dulu.</td></tr>'}</tbody>
+      </table>`;
+
+    $("#settle").addEventListener("click", settleJournal);
+  } catch (error) {
+    panel.innerHTML = `<p class="muted pad">Gagal memuat jurnal: ${esc(error.message)}</p>`;
+  }
+}
+
+async function settleJournal() {
+  const button = $("#settle");
+  if (button) { button.disabled = true; button.textContent = "Menilai…"; }
+  try {
+    const result = await api("/api/settle", { method: "POST", body: "{}" });
+    const done = result.settled?.length || 0;
+    const waiting = result.waiting?.length || 0;
+    toast(done ? `${done} keputusan dinilai${waiting ? `, ${waiting} belum jatuh tempo` : ""}.`
+      : `Belum ada yang bisa dinilai${waiting ? ` — ${waiting} menunggu jendela 5 sesi` : ""}.`);
+    await loadJournal();
+  } catch (error) {
+    toast(`Gagal menilai: ${error.message}`, true);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Nilai keputusan yang jatuh tempo"; }
+  }
+}
+
+/* ---------- portfolio ---------- */
+
+async function loadPortfolio(render = false) {
+  try {
+    const payload = await api("/api/portfolio");
+    state.portfolio = payload;
+    if (render) paintPortfolio(payload);
+  } catch (error) {
+    if (render) $("#panel").innerHTML = `<p class="muted pad">${esc(error.message)}</p>`;
+  }
+}
+
+function paintPortfolio(payload) {
+  const rows = (payload.positions || []).map((position) => `
+    <tr>
+      <td>${esc(position.symbol.replace(".JK", ""))}</td>
+      <td class="num">${rp(position.quantity)}</td>
+      <td class="num">${rp(position.avg_price)}</td>
+      <td class="num">${rp(position.price)}</td>
+      <td class="num">${rp(position.value)}</td>
+      <td class="num ${tone(position.pnl)}">${rp(position.pnl)} (${pct(position.pnl_pct * 100)})</td>
+    </tr>`).join("");
+
+  $("#panel").innerHTML = `
+    <div class="statgrid">
+      <div class="stat"><div class="k">Ekuitas</div><div class="v">Rp${rp(payload.equity)}</div></div>
+      <div class="stat"><div class="k">Nilai saham</div><div class="v">Rp${rp(payload.market_value)}</div></div>
+      <div class="stat"><div class="k">Kas</div><div class="v">Rp${rp(payload.cash)}</div></div>
+      <div class="stat"><div class="k">Laba/rugi</div>
+        <div class="v ${tone(payload.pnl)}">Rp${rp(payload.pnl)}</div></div>
+    </div>
+    <div class="toolbar">
+      <input id="p-symbol" placeholder="BBCA" aria-label="kode">
+      <input id="p-qty" placeholder="lot (100)" aria-label="jumlah lot">
+      <input id="p-avg" placeholder="harga rata-rata" aria-label="harga rata-rata">
+      <button class="primary" id="p-add">Tambah / ubah</button>
+      <input id="p-cash" placeholder="kas (Rp)" aria-label="kas" value="${payload.cash || ""}">
+      <button class="ghost" id="p-set-cash">Simpan kas</button>
+    </div>
+    <table>
+      <thead><tr><th>Kode</th><th class="num">Jumlah</th><th class="num">Rata-rata</th>
+      <th class="num">Harga</th><th class="num">Nilai</th><th class="num">Laba/rugi</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">Belum ada posisi.</td></tr>'}</tbody>
+    </table>`;
+
+  $("#p-add").addEventListener("click", async () => {
+    const symbol = normaliseSymbol($("#p-symbol").value);
+    const lots = Number($("#p-qty").value);
+    const average = Number($("#p-avg").value);
+    if (!symbol || !lots || !average) return toast("Isi kode, jumlah lot, dan harga rata-rata.", true);
+    try {
+      await api("/api/portfolio", {
+        method: "POST",
+        body: JSON.stringify({ symbol, quantity: lots * 100, avg_price: average }),
+      });
+      toast(`${symbol}: ${lots} lot dicatat.`);
+      await loadPortfolio(true);
+    } catch (error) { toast(error.message, true); }
+  });
+
+  $("#p-set-cash").addEventListener("click", async () => {
+    try {
+      await api("/api/cash", { method: "POST", body: JSON.stringify({ value: Number($("#p-cash").value) || 0 }) });
+      toast("Kas disimpan.");
+      await loadPortfolio(true);
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+/* ---------- events ---------- */
+
+function wireEvents() {
+  $("#analyse").addEventListener("click", () => openSymbol($("#symbol").value, { analyse: true }));
+  $("#symbol").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") openSymbol($("#symbol").value, { analyse: true });
+  });
+
+  $("#opt-ai").addEventListener("change", (event) => {
+    prefs.ai = event.target.checked;
+    toast(prefs.ai
+      ? "Analisis akan memakai AI: satu panggilan model per tekan."
+      : "Analisis tanpa AI: hanya mesin deterministik, tanpa biaya.");
+  });
+
+  $("#opt-auto").addEventListener("change", (event) => {
+    prefs.auto = event.target.checked;
+    toast(prefs.auto
+      ? "Analisis otomatis aktif: setiap halaman dibuka memakai satu panggilan model."
+      : "Analisis otomatis dimatikan.");
+  });
+
+  $$("#ranges button").forEach((button) => button.addEventListener("click", async () => {
+    $$("#ranges button").forEach((other) => other.classList.remove("on"));
+    button.classList.add("on");
+    state.range = button.dataset.range;
+    await loadMarket(state.symbol, state.range);
+  }));
+
+  const chartRefresh = $("#chart-refresh");
+  if (chartRefresh) {
+    chartRefresh.addEventListener("click", async () => {
+      chartRefresh.classList.add("spin");
+      await loadMarket(state.symbol, state.range, { fresh: true });
+      await loadBenchmark();
+      setTimeout(() => chartRefresh.classList.remove("spin"), 400);
+    });
+  }
+
+  $$("#tabs button").forEach((button) => button.addEventListener("click", () => {
+    $$("#tabs button").forEach((other) => other.classList.remove("on"));
+    button.classList.add("on");
+    state.tab = button.dataset.tab;
+    paintPanel(state.tab);
+  }));
+
+  $("#refresh").addEventListener("click", () => { loadWatchlist(); loadBenchmark(); });
+
+  $("#add-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const symbol = normaliseSymbol($("#add-symbol").value);
+    if (!symbol) return;
+    try {
+      await api("/api/watchlist", { method: "POST", body: JSON.stringify({ add: [symbol] }) });
+      $("#add-symbol").value = "";
+      await loadWatchlist();
+      toast(`${symbol} ditambahkan ke watchlist.`);
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+if (typeof window !== "undefined") {
+  boot();
+}
+
+/* Exported for the headless render check (tools/check_ui.mjs). The dashboard
+   itself never reads these. */
+if (typeof module !== "undefined") {
+  module.exports = { renderCandles, viewRoles, viewDebate, viewRisk, viewAdvice, viewIdle,
+                     aiStrip, paintVerdict, showCross, hideCross, axisLabel, fullLabel,
+                     state, prefs, esc, rp, pct };
+}
