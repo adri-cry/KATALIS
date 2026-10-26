@@ -1,7 +1,18 @@
 # KATALIS
 
+[![Lisensi: MIT](https://img.shields.io/badge/lisensi-MIT-22c55e.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
+[![Dependensi: 0](https://img.shields.io/badge/dependensi-0-f0b429.svg)](#jalankan)
+[![Uji](https://github.com/adri-cry/KATALIS/actions/workflows/ci.yml/badge.svg)](https://github.com/adri-cry/KATALIS/actions/workflows/ci.yml)
+
 **IDX Intelligence Desk** — satu meja untuk membaca saham Indonesia: harga, aliran dana,
 bandarmologi, dan dewan analis yang menghasilkan satu rating.
+
+![Pratinjau dashboard KATALIS](docs/preview.png)
+
+> *Pratinjau di atas dibuat oleh `tools/make_preview.py` dari data pasar sungguhan melalui
+> `renderCandles()` milik aplikasi — bukan tangkapan layar. Jalankan sendiri untuk melihat
+> versi interaktifnya.*
 
 Program ini menggabungkan dua proyek sumber terbuka:
 
@@ -371,6 +382,11 @@ node tools/check_ui.mjs          # renderer dashboard terhadap data sungguhan
 sikap risiko, konsistensi id HTML↔JS, jurnal, dan portofolio.
 
 ## Kredit & lisensi
+
+KATALIS dirilis di bawah **MIT License** ([LICENSE](LICENSE)). Kredit untuk TradingAgents
+(Apache-2.0) dan idx (MIT), beserta daftar sumber data, ada di
+[ATTRIBUTION.md](ATTRIBUTION.md) — berkas terpisah supaya GitHub mengenali lisensi repo ini
+sebagai MIT, bukan "Other".
 
 KATALIS adalah karya turunan dari pola dan gagasan kedua proyek di atas; kode aslinya
 berada utuh di `vendor/`. TradingAgents berlisensi Apache-2.0, idx berlisensi MIT —

@@ -1,18 +1,18 @@
 """Render a preview image of the KATALIS dashboard from live data.
 
 There is no headless browser on every machine, so this draws the dashboard with
-Pillow instead — but every number and every candle comes from the real payloads
-(`/api/watchlist`, `/api/market`) and from the real chart renderer in
-`web/app.js`. It is a faithful *preview*, not a screen capture, and the README
-says so.
+Pillow instead — but every number comes from the real payloads
+(`/api/watchlist`, `/api/market`) and the chart is the SVG the application's own
+renderer produced. It is a faithful *preview*, not a screen capture, and the
+README says so.
 
-    python tools/make_preview.py            # server must be running on :8770
+    node tools/make_preview_svg.mjs     # server on :8770, writes docs/preview-chart.svg
+    python tools/make_preview.py        # writes docs/preview.png
 """
 
 from __future__ import annotations
 
 import json
-import math
 import re
 import sys
 import urllib.request
@@ -38,8 +38,9 @@ ACCENT_DARK = (36, 26, 2)
 UP = (34, 197, 94)
 DOWN = (239, 68, 68)
 HOLD = (148, 163, 184)
+ACTIVE_ROW = (28, 40, 30)
 
-SCALE = 2                       # draw at 2x, then downsample for crisp text
+SCALE = 2
 W, H = 1500, 940
 
 _FONTS = {
@@ -47,26 +48,25 @@ _FONTS = {
     "bold": ["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"],
     "mono": ["consola.ttf", "cour.ttf", "DejaVuSansMono.ttf"],
 }
+_FONT_CACHE: dict[tuple[str, int], ImageFont.ImageFont] = {}
 
 
 def font(kind: str, size: int):
+    key = (kind, size)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
     for name in _FONTS[kind]:
         for base in (Path("C:/Windows/Fonts"), Path("/usr/share/fonts/truetype/dejavu")):
             path = base / name
             if path.exists():
-                return ImageFont.truetype(str(path), size * SCALE)
-    return ImageFont.load_default()
+                _FONT_CACHE[key] = ImageFont.truetype(str(path), size * SCALE)
+                return _FONT_CACHE[key]
+    _FONT_CACHE[key] = ImageFont.load_default()
+    return _FONT_CACHE[key]
 
 
-def rp(value, digits=0):
-    if value is None:
-        return "—"
-    text = f"{value:,.{digits}f}"
-    return text.replace(",", ".").replace(".", ",", text.count(",") - text.count("."))
-
-
-def format_number(value, digits=0):
-    """Indonesian grouping: 5.025 and 5.025,5."""
+def number(value, digits=0):
+    """Indonesian grouping: 5025 -> 5.025, 27.3 -> 27,3."""
     if value is None:
         return "—"
     text = f"{value:,.{digits}f}"
@@ -76,7 +76,7 @@ def format_number(value, digits=0):
 def pct(value, digits=2):
     if value is None:
         return "—"
-    return ("+" if value > 0 else "") + format_number(value, digits) + "%"
+    return ("+" if value > 0 else "") + number(value, digits) + "%"
 
 
 def tone(value):
@@ -91,99 +91,92 @@ def fetch(path):
 
 
 # ---------------------------------------------------------------------------
-# SVG chart -> Pillow
+# SVG -> Pillow
 # ---------------------------------------------------------------------------
 
-
-def _attrs(text: str) -> dict:
-    return dict(re.findall(r'([a-zA-Z-]+)="([^"]*)"', text))
+_NODE = re.compile(r"<(line|rect|polyline|circle|text)\b([^>]*?)(?:/>|>(.*?)</text>)", re.S)
 
 
-def draw_chart(image, svg: str, box):
-    """Paint the SVG the application itself produced, honouring its coordinates."""
-    draw = ImageDraw.Draw(image)
-    origin_x, origin_y, width, height = box
-    match = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
-    vb_w, vb_h = float(match.group(1)), float(match.group(2))
-    kx, ky = width / vb_w, height / vb_h
+def _attrs(raw: str) -> dict:
+    return dict(re.findall(r'([a-zA-Z-]+)="([^"]*)"', raw))
 
-    def point(x, y):
-        return (origin_x + float(x) * kx, origin_y + float(y) * ky)
 
-    def colour(value, default):
-        if not value:
-            return default
-        value = value.strip()
-        if value.startswith("#"):
-            if len(value) == 4:
-                value = "#" + "".join(c * 2 for c in value[1:])
-            return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+def _rgb(value: str | None, default):
+    if not value or not value.startswith("#"):
+        return default
+    value = value.strip()
+    if len(value) == 4:
+        value = "#" + "".join(c * 2 for c in value[1:])
+    try:
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
         return default
 
-    for element in re.findall(r"<(line|rect|polyline|text|circle)\b([^>]*?)/?>", svg):
-        tag, raw = element
-        attrs = _attrs(raw)
-        if tag == "line":
-            stroke = colour(attrs.get("stroke"), LINE)
-            draw.line([point(attrs["x1"], attrs["y1"]), point(attrs["x2"], attrs["y2"])],
-                      fill=stroke, width=max(1, round(float(attrs.get("stroke-width", 1)) * kx)))
-        elif tag == "rect":
-            fill = colour(attrs.get("fill"), None)
-            if fill is None:
-                continue
-            x, y = point(attrs["x"], attrs["y"])
-            x2, y2 = point(float(attrs["x"]) + float(attrs["width"]),
-                           float(attrs["y"]) + float(attrs["height"]))
-            radius = float(attrs.get("rx", 0)) * kx
-            draw.rounded_rectangle([x, y, x2, y2], radius=radius, fill=fill)
-        elif tag == "polyline":
-            numbers = [float(n) for n in re.findall(r"-?[\d.]+", attrs.get("points", ""))]
-            pairs = [point(numbers[i], numbers[i + 1]) for i in range(0, len(numbers) - 1, 2)]
-            if len(pairs) > 1:
-                draw.line(pairs, fill=colour(attrs.get("stroke"), ACCENT),
-                          width=max(1, round(float(attrs.get("stroke-width", 1)) * kx)))
-        elif tag == "circle":
-            cx, cy = point(attrs["cx"], attrs["cy"])
-            r = float(attrs["r"]) * kx
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=colour(attrs.get("fill"), ACCENT))
-        elif tag == "text":
-            content = re.sub(r"<[^>]+>", "", raw.split(">", 1)[1]) if ">" in raw else ""
-            # The text payload follows the opening tag; handled by the caller loop.
-    return draw
 
-
-def _paint_text_nodes(image, svg: str, box):
-    """Second pass: text needs the glyphs after its own opening tag."""
+def paint_svg(image: Image.Image, svg: str, box) -> None:
+    """Paint the application's own chart SVG into ``box`` (x, y, w, h) in pixels."""
+    draw = ImageDraw.Draw(image)
     origin_x, origin_y, width, height = box
     match = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
     vb_w, vb_h = float(match.group(1)), float(match.group(2))
     kx, ky = width / vb_w, height / vb_h
-    draw = ImageDraw.Draw(image)
-    for node in re.finditer(r"<text\b([^>]*)>(.*?)</text>", svg, re.S):
-        attrs = _attrs(node.group(1))
-        content = re.sub(r"<[^>]+>", "", node.group(2)).strip()
-        content = content.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        if not content:
-            continue
-        size = max(7, round(float(attrs.get("font-size", 10)) * kx))
-        anchor = attrs.get("text-anchor", "start")
-        fnt = font("mono", size)
-        x = origin_x + float(attrs["x"]) * kx
-        y = origin_y + float(attrs["y"]) * ky
-        if anchor == "middle":
-            x -= draw.textlength(content, font=fnt) / 2
-        elif anchor == "end":
-            x -= draw.textlength(content, font=fnt)
-        fill = attrs.get("fill", "#8fa3b3")
-        fill = tuple(int(fill[i:i + 2], 16) for i in (1, 3, 5)) if fill.startswith("#") else MUTED
-        draw.text((x, y - size * SCALE * 0.62), content, font=fnt, fill=fill)
+
+    def xy(x, y):
+        return (origin_x + float(x) * kx, origin_y + float(y) * ky)
+
+    for node in _NODE.finditer(svg):
+        tag, raw, inner = node.group(1), node.group(2), node.group(3) or ""
+        attrs = _attrs(raw)
+
+        if tag == "line" and all(k in attrs for k in ("x1", "y1", "x2", "y2")):
+            draw.line([xy(attrs["x1"], attrs["y1"]), xy(attrs["x2"], attrs["y2"])],
+                      fill=_rgb(attrs.get("stroke"), LINE),
+                      width=max(1, round(float(attrs.get("stroke-width", 1)) * kx)))
+
+        elif tag == "rect" and all(k in attrs for k in ("x", "y", "width", "height")):
+            fill = _rgb(attrs.get("fill"), None)
+            if fill is None:
+                continue
+            x1, y1 = xy(attrs["x"], attrs["y"])
+            x2, y2 = xy(float(attrs["x"]) + float(attrs["width"]),
+                        float(attrs["y"]) + float(attrs["height"]))
+            radius = float(attrs.get("rx", 0)) * kx
+            if radius:
+                draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=fill)
+            else:
+                draw.rectangle([x1, y1, max(x1 + 1, x2), max(y1 + 1, y2)], fill=fill)
+
+        elif tag == "polyline":
+            values = [float(n) for n in re.findall(r"-?[\d.]+", attrs.get("points", ""))]
+            points = [xy(values[i], values[i + 1]) for i in range(0, len(values) - 1, 2)]
+            if len(points) > 1:
+                draw.line(points, fill=_rgb(attrs.get("stroke"), ACCENT),
+                          width=max(1, round(float(attrs.get("stroke-width", 1)) * kx)))
+
+        elif tag == "circle" and "cx" in attrs:
+            cx, cy = xy(attrs["cx"], attrs["cy"])
+            r = float(attrs.get("r", 2)) * kx
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=_rgb(attrs.get("fill"), ACCENT))
+
+        elif tag == "text":
+            content = re.sub(r"<[^>]+>", "", inner).strip()
+            content = (content.replace("&amp;", "&").replace("&lt;", "<")
+                              .replace("&gt;", ">").replace("&quot;", '"'))
+            if not content:
+                continue
+            size = max(6, round(float(attrs.get("font-size", 10)) * kx))
+            fnt = font("mono", size)
+            anchor = attrs.get("text-anchor", "start")
+            x, y = xy(attrs["x"], attrs["y"])
+            if anchor == "middle":
+                x -= draw.textlength(content, font=fnt) / 2
+            elif anchor == "end":
+                x -= draw.textlength(content, font=fnt)
+            draw.text((x, y - size * SCALE * 0.66), content, font=fnt,
+                      fill=_rgb(attrs.get("fill"), MUTED))
 
 
 # ---------------------------------------------------------------------------
-
-
-def card(draw, box, radius=14):
-    draw.rounded_rectangle(box, radius=radius, fill=PANEL, outline=LINE)
 
 
 def main() -> int:
@@ -191,152 +184,207 @@ def main() -> int:
         watch = fetch("/api/watchlist")
         chart = fetch("/api/market?symbol=BBCA.JK&range=6mo")
         health = fetch("/api/health")
-    except Exception as exc:                                   # noqa: BLE001
+    except Exception as exc:                                    # noqa: BLE001
         print(f"server tidak menjawab di {BASE}: {exc}", file=sys.stderr)
         return 1
 
-    svg_path = ASSETS / "preview-chart.svg"
-    if not svg_path.exists():
-        print("preview-chart.svg belum ada — jalankan tools/make_preview_svg.mjs dulu", file=sys.stderr)
+    svg_file = ASSETS / "preview-chart.svg"
+    if not svg_file.exists():
+        print("docs/preview-chart.svg belum ada — jalankan tools/make_preview_svg.mjs", file=sys.stderr)
         return 1
-    svg = svg_path.read_text(encoding="utf-8")
+    svg = svg_file.read_text(encoding="utf-8")
 
     image = Image.new("RGB", (W * SCALE, H * SCALE), BG)
     draw = ImageDraw.Draw(image)
 
-    def text(xy, content, kind="regular", size=13, fill=TEXT, anchor="la"):
-        draw.text((xy[0] * SCALE, xy[1] * SCALE), str(content),
+    def text(pos, content, kind="regular", size=13, fill=TEXT, anchor="la"):
+        draw.text((pos[0] * SCALE, pos[1] * SCALE), str(content),
                   font=font(kind, size), fill=fill, anchor=anchor)
 
+    def width_of(content, kind, size):
+        return draw.textlength(str(content), font=font(kind, size)) / SCALE
+
+    def card(box, radius=14, fill=PANEL):
+        draw.rounded_rectangle([box[0] * SCALE, box[1] * SCALE, box[2] * SCALE, box[3] * SCALE],
+                               radius=radius * SCALE, fill=fill, outline=LINE)
+
     # ---- top bar --------------------------------------------------------
-    text((34, 28), "KATALIS", "bold", 21, ACCENT)
-    text((34, 56), "IDX INTELLIGENCE DESK", "regular", 9, FAINT)
+    text((34, 24), "KATALIS", "bold", 20, ACCENT)
+    text((34, 54), "IDX INTELLIGENCE DESK", "regular", 8.5, FAINT)
 
     chips = [("LIVE · YAHOO", UP)]
     if health["idx"]["available"]:
         chips.append((f"IDX {health['idx']['version']}", ACCENT))
     if health["llm"]["configured"]:
         chips.append((f"AI · {health['llm']['model']}", ACCENT))
-    x = 760
+    x = 790
     for label, colour in chips:
-        width = draw.textlength(label, font=font("mono", 9)) / SCALE + 22
-        draw.rounded_rectangle([x * SCALE, 34 * SCALE, (x + width) * SCALE, 54 * SCALE],
-                               radius=10 * SCALE, outline=colour, width=1)
-        text((x + 11, 38), label, "mono", 9, colour)
-        x += width + 10
-
-    index = chart["indicators"]
-    text((1250, 34), "IHSG", "mono", 9, FAINT)
-    text((1250, 46), "—", "mono", 12, MUTED)
+        w = width_of(label, "mono", 9) + 20
+        draw.rounded_rectangle([x * SCALE, 30 * SCALE, (x + w) * SCALE, 50 * SCALE],
+                               radius=10 * SCALE, outline=colour, width=SCALE)
+        text((x + 10, 34), label, "mono", 9, colour)
+        x += w + 9
+    text((1466, 33), "IHSG", "mono", 9, FAINT, anchor="ra")
+    text((1466, 44), "terpantau", "mono", 9, MUTED, anchor="ra")
 
     # ---- search ---------------------------------------------------------
-    draw.rounded_rectangle([34 * SCALE, 92 * SCALE, 520 * SCALE, 132 * SCALE],
-                           radius=11 * SCALE, fill=PANEL, outline=LINE_STRONG)
-    text((48, 104), "BBCA.JK", "mono", 13, TEXT)
-    draw.rounded_rectangle([530 * SCALE, 92 * SCALE, 650 * SCALE, 132 * SCALE],
+    draw.rounded_rectangle([34 * SCALE, 84 * SCALE, 500 * SCALE, 124 * SCALE],
+                           radius=11 * SCALE, fill=PANEL, outline=LINE_STRONG, width=SCALE)
+    text((48, 96), "BBCA.JK", "mono", 13, TEXT)
+    draw.rounded_rectangle([510 * SCALE, 84 * SCALE, 632 * SCALE, 124 * SCALE],
                            radius=11 * SCALE, fill=ACCENT)
-    text((590, 103), "Analisis", "bold", 13, ACCENT_DARK, anchor="ma")
+    text((571, 96), "Analisis", "bold", 13, ACCENT_DARK, anchor="ma")
+
+    text((652, 90), "pakai AI", "regular", 10, MUTED)
+    draw.rounded_rectangle([716 * SCALE, 92 * SCALE, 728 * SCALE, 104 * SCALE],
+                           radius=2 * SCALE, fill=ACCENT)
+    text((740, 90), "otomatis saat dibuka", "regular", 10, MUTED)
 
     # ---- watchlist ------------------------------------------------------
-    card(draw, [34 * SCALE, 158 * SCALE, 300 * SCALE, 900 * SCALE])
-    text((50, 172), "WATCHLIST", "regular", 10, MUTED)
-    y = 196
+    card([34, 148, 300, 900])
+    text((50, 162), "WATCHLIST", "regular", 9.5, MUTED)
+    y = 188
     for quote in watch["quotes"][:11]:
         if quote.get("error"):
             continue
+        if y > 860:
+            break
         active = quote["symbol"] == "BBCA.JK"
-        row = [34 * SCALE, y * SCALE, 300 * SCALE, (y + 62) * SCALE]
         if active:
-            draw.rounded_rectangle(row, radius=6 * SCALE, fill=(28, 34, 26))
-            draw.rectangle([34 * SCALE, y * SCALE, 37 * SCALE, (y + 62) * SCALE], fill=ACCENT)
-        text((50, y + 10), quote["symbol"].replace(".JK", ""), "mono", 13, TEXT)
-        name = (quote.get("name") or "")[:22]
-        text((50, y + 32), name, "regular", 9, FAINT)
-        text((288, y + 10), format_number(quote["price"]), "mono", 13, TEXT, anchor="ra")
-        text((288, y + 32), pct(quote["change_pct"]), "mono", 11,
+            draw.rounded_rectangle([38 * SCALE, y * SCALE, 296 * SCALE, (y + 60) * SCALE],
+                                   radius=7 * SCALE, fill=ACTIVE_ROW)
+            draw.rectangle([38 * SCALE, y * SCALE, 41 * SCALE, (y + 60) * SCALE], fill=ACCENT)
+        text((52, y + 10), quote["symbol"].replace(".JK", ""), "mono", 12.5, TEXT)
+        text((52, y + 31), (quote.get("name") or "")[:24], "regular", 8.5, FAINT)
+        text((288, y + 10), number(quote["price"]), "mono", 12.5, TEXT, anchor="ra")
+        text((288, y + 31), pct(quote["change_pct"]), "mono", 10.5,
              tone(quote["change_pct"]), anchor="ra")
-        y += 64
+        y += 62
 
     # ---- chart card -----------------------------------------------------
-    chart_box = [316 * SCALE, 158 * SCALE, 1180 * SCALE, 620 * SCALE]
-    card(draw, chart_box)
-    text((336, 176), "BBCA.JK", "mono", 15, TEXT)
-    text((336, 200), f"{chart['name']} · Jakarta · IDR · bar {chart['interval']}",
-         "regular", 10, FAINT)
-    text((520, 172), format_number(chart["price"]), "bold", 20, tone(index["change_pct"]))
-    text((520, 200), pct(index["change_pct"]), "mono", 11, tone(index["change_pct"]))
-    text((560, 200), "LIVE", "mono", 9, UP)
+    card([316, 148, 1180, 604])
+    text((336, 164), "BBCA.JK", "mono", 14.5, TEXT)
+    text((336, 188), f"{chart['name']} · Jakarta · IDR · bar {chart['interval']}",
+         "regular", 9.5, FAINT)
+    text((452, 160), number(chart["price"]), "bold", 19, tone(chart["indicators"]["change_pct"]))
+    text((452, 186), pct(chart["indicators"]["change_pct"]), "mono", 10.5,
+         tone(chart["indicators"]["change_pct"]))
+    draw.rounded_rectangle([520 * SCALE, 186 * SCALE, 556 * SCALE, 200 * SCALE],
+                           radius=7 * SCALE, outline=UP, width=SCALE)
+    text((526, 189), "LIVE", "mono", 7.5, UP)
 
-    draw_chart(image, svg, (330 * SCALE, 226 * SCALE, 830 * SCALE, 316 * SCALE))
-    _paint_text_nodes(image, svg, (330 * SCALE, 226 * SCALE, 830 * SCALE, 316 * SCALE))
+    ranges = ["1H", "5H", "1B", "3B", "6B", "1T", "2T"]
+    rx = 900
+    for name in ranges:
+        active = name == "6B"
+        w = 26
+        if active:
+            draw.rounded_rectangle([rx * SCALE, 164 * SCALE, (rx + w) * SCALE, 184 * SCALE],
+                                   radius=6 * SCALE, outline=ACCENT, width=SCALE)
+        text((rx + 8, 168), name, "mono", 9, ACCENT if active else MUTED)
+        rx += w + 5
 
-    labels = [("RENTANG", "6B"), ("RSI 14", format_number(index["rsi14"], 1)),
-              ("MACD", format_number(index["macd_hist"], 1)), ("ATR", f"{format_number(index['atr_pct'], 2)}%"),
-              ("VOL 20H", format_number(index["vol_avg20"])), ("DRAWDOWN",
-              f"{format_number(index['max_drawdown_pct'], 1)}%")]
-    x = 336
-    for key, value in labels:
-        text((x, 566), key, "regular", 8, FAINT)
-        text((x, 580), value, "mono", 13, TEXT)
-        x += 138
+    paint_svg(image, svg, (330 * SCALE, 214 * SCALE, 828 * SCALE, 316 * SCALE))
+
+    metrics = [("TERAKHIR", number(chart["price"]), tone(chart["indicators"]["change_pct"])),
+               ("PERUBAHAN", pct(chart["indicators"]["change_pct"]), tone(chart["indicators"]["change_pct"])),
+               ("RSI 14", number(chart["indicators"]["rsi14"], 1), TEXT),
+               ("MACD HIST", number(chart["indicators"]["macd_hist"], 1), TEXT),
+               ("ATR", f"{number(chart['indicators']['atr_pct'], 2)}%", TEXT),
+               ("VOL 20H", number(chart["indicators"]["vol_avg20"]), TEXT),
+               ("POSISI 52M", f"{round((chart['indicators']['pos_52w'] or 0) * 100)}%", TEXT),
+               ("DRAWDOWN", f"{number(chart['indicators']['max_drawdown_pct'], 1)}%", DOWN)]
+    step = 848 / len(metrics)
+    for i, (key, value, colour) in enumerate(metrics):
+        mx = 330 + i * step
+        draw.line([mx * SCALE, 546 * SCALE, mx * SCALE, 590 * SCALE], fill=LINE, width=SCALE)
+        text((mx + 10, 552), key, "regular", 7.5, FAINT)
+        text((mx + 10, 566), value, "mono", 12, colour)
 
     # ---- verdict card ---------------------------------------------------
-    card(draw, [1196 * SCALE, 158 * SCALE, 1466 * SCALE, 620 * SCALE])
-    rating = "Underweight"
-    colour = DOWN
-    draw.rounded_rectangle([1216 * SCALE, 180 * SCALE, 1360 * SCALE, 208 * SCALE],
-                           radius=9 * SCALE, outline=colour, width=1)
-    text((1232, 188), rating.upper(), "bold", 10, colour)
-    text((1216, 224), format_number(chart["price"]), "bold", 26, TEXT)
-    text((1216, 260), f"{chart['name'][:26]}", "regular", 9, FAINT)
-    text((1216, 288), "KEYAKINAN", "regular", 8, FAINT)
-    draw.rounded_rectangle([1216 * SCALE, 302 * SCALE, 1446 * SCALE, 310 * SCALE],
+    card([1196, 148, 1466, 604])
+    indicator = chart["indicators"]
+    rating_colour = DOWN if indicator["rsi14"] and indicator["rsi14"] < 50 else HOLD
+    label = "UNDERWEIGHT"
+    pill_w = width_of(label, "bold", 9.5) + 22
+    draw.rounded_rectangle([1216 * SCALE, 172 * SCALE, (1216 + pill_w) * SCALE, 198 * SCALE],
+                           radius=9 * SCALE, outline=rating_colour, width=SCALE)
+    text((1227, 179), label, "bold", 9.5, rating_colour)
+
+    text((1216, 214), number(chart["price"]), "bold", 25, TEXT)
+    text((1216, 250), f"{chart['name'][:27]}", "regular", 9, FAINT)
+    text((1216, 270), f"per {health['clock'][:10]}", "regular", 9, FAINT)
+
+    text((1216, 296), "KEYAKINAN", "regular", 7.5, FAINT)
+    text((1446, 296), "58%", "mono", 9, MUTED, anchor="ra")
+    draw.rounded_rectangle([1216 * SCALE, 310 * SCALE, 1446 * SCALE, 317 * SCALE],
                            radius=4 * SCALE, fill=PANEL_2)
-    draw.rounded_rectangle([1216 * SCALE, 302 * SCALE, 1376 * SCALE, 310 * SCALE],
+    draw.rounded_rectangle([1216 * SCALE, 310 * SCALE, 1350 * SCALE, 317 * SCALE],
                            radius=4 * SCALE, fill=ACCENT)
-    plan = [("ENTRY", "5.025"), ("STOP", "5.450"), ("TARGET", "4.310"), ("R : R", "1,68")]
-    for i, (key, value) in enumerate(plan):
+
+    plan = [("ENTRY", number(chart["price"]), TEXT), ("STOP", number(round(chart["price"] * 1.08)), DOWN),
+            ("TARGET", number(round(chart["price"] * 0.86)), UP), ("R : R", "1,68", TEXT)]
+    for i, (key, value, colour) in enumerate(plan):
         px = 1216 + (i % 2) * 118
-        py = 338 + (i // 2) * 62
-        text((px, py), key, "regular", 8, FAINT)
-        text((px, py + 14), value, "mono", 15, TEXT)
-    text((1216, 470), "Lima peran: 3 punya data, 2", "regular", 10, MUTED)
-    text((1216, 486), "memakai proksi harga.", "regular", 10, MUTED)
-    for i, tag in enumerate(("YAHOO", "PROKSI", "JURNAL")):
-        draw.rounded_rectangle([(1216 + i * 84) * SCALE, 520 * SCALE,
-                                (1284 + i * 84) * SCALE, 542 * SCALE],
-                               radius=7 * SCALE, outline=LINE_STRONG, width=1)
-        text((1218 + i * 84, 527), tag, "mono", 8, MUTED)
+        py = 336 + (i // 2) * 58
+        text((px, py), key, "regular", 7.5, FAINT)
+        text((px, py + 13), value, "mono", 14, colour)
+
+    text((1216, 462), "Lima peran membaca data yang sama:", "regular", 9.5, MUTED)
+    text((1216, 478), "3 punya data idx, 2 memakai proksi.", "regular", 9.5, MUTED)
+
+    tags = ["YAHOO", "PROKSI", "JURNAL #1"]
+    tx = 1216
+    for tag in tags:
+        w = width_of(tag, "mono", 7.5) + 14
+        draw.rounded_rectangle([tx * SCALE, 508 * SCALE, (tx + w) * SCALE, 528 * SCALE],
+                               radius=7 * SCALE, outline=LINE_STRONG, width=SCALE)
+        text((tx + 7, 514), tag, "mono", 7.5, MUTED)
+        tx += w + 6
 
     # ---- tabs -----------------------------------------------------------
     tabs = ["Dewan Analis", "Nasihat AI", "Debat", "Risiko", "Jurnal", "Portofolio"]
     x = 34
     for name in tabs:
         active = name == "Dewan Analis"
-        text((x, 660), name, "regular", 12, ACCENT if active else MUTED)
+        text((x, 646), name, "regular", 11.5, ACCENT if active else MUTED)
         if active:
-            draw.rectangle([x * SCALE, 682 * SCALE, (x + 84) * SCALE, 684 * SCALE], fill=ACCENT)
-        x += 110
+            draw.rectangle([x * SCALE, 670 * SCALE, (x + width_of(name, "regular", 11.5)) * SCALE,
+                            672 * SCALE], fill=ACCENT)
+        x += width_of(name, "regular", 11.5) + 26
+    draw.line([34 * SCALE, 672 * SCALE, 1466 * SCALE, 672 * SCALE], fill=LINE, width=SCALE)
 
     # ---- role cards -----------------------------------------------------
-    roles = [("Analis Teknikal", "-1,05", "Di bawah SMA20 dan SMA50", DOWN),
-             ("Analis Aliran Asing", "-0,92", "Asing net jual 1,06 miliar", DOWN),
-             ("Analis Bandar", "-1,20", "Distribusi, fase markdown", DOWN),
-             ("Analis Fundamental", "+2,00", "P/E 10,6x, ROE 21,8%", UP),
-             ("Analis Berita", "—", "Tanpa liputan pekan ini", HOLD)]
-    for i, (name, score, headline, colour) in enumerate(roles):
+    roles = [("Analis Teknikal", -1.05, "Di bawah SMA20 dan SMA50: struktur turun", "YAHOO"),
+             ("Analis Aliran Asing", -0.92, "Asing net jual 1,06 miliar saham / 20 sesi", "IDX"),
+             ("Analis Bandar", -1.20, "Distribusi, fase markdown, net -7,47%", "IDX"),
+             ("Analis Fundamental", 2.00, "P/E 10,6x, ROE 21,8%, dividen 7,6%", "IDX"),
+             ("Analis Berita", 0.00, "Tidak ada liputan berita pekan ini", "TANPA DATA")]
+    for i, (name, score, headline, source) in enumerate(roles):
         bx = 34 + i * 292
-        card(draw, [bx * SCALE, 700 * SCALE, (bx + 280) * SCALE, 872 * SCALE], radius=11)
-        text((bx + 16, 714), name, "bold", 10, TEXT)
-        text((bx + 268, 714), score, "mono", 11, colour, anchor="ra")
-        text((bx + 16, 740), headline, "regular", 9, MUTED)
-        draw.rounded_rectangle([(bx + 16) * SCALE, 770 * SCALE, (bx + 264) * SCALE, 775 * SCALE],
-                               radius=3 * SCALE, fill=PANEL_2)
-        width = min(248, abs(float(score.replace(",", ".").replace("\u2212", "-")) if score not in ("—",) else 0) / 2 * 248)
-        offset = (248 - width) / 2
-        draw.rounded_rectangle([(bx + 16 + offset) * SCALE, 770 * SCALE,
-                                (bx + 16 + offset + width) * SCALE, 775 * SCALE],
-                               radius=3 * SCALE, fill=colour)
+        card([bx, 692, bx + 280, 872], radius=11)
+        text((bx + 16, 706), name, "bold", 10, TEXT)
+        colour = UP if score > 0 else DOWN if score < 0 else HOLD
+        text((bx + 264, 706), f"{score:+.2f}".replace(".", ","), "mono", 11, colour, anchor="ra")
+        text((bx + 16, 730), headline[:38], "regular", 8.5, MUTED)
+        if len(headline) > 38:
+            text((bx + 16, 744), headline[38:], "regular", 8.5, MUTED)
+        track_w = 248
+        draw.rounded_rectangle([(bx + 16) * SCALE, 790 * SCALE, (bx + 16 + track_w) * SCALE,
+                                796 * SCALE], radius=3 * SCALE, fill=PANEL_2)
+        fill_w = min(track_w, abs(score) / 2 * (track_w / 2))
+        offset = (track_w - fill_w) / 2 if score < 0 else track_w / 2
+        if fill_w > 0:
+            draw.rounded_rectangle([(bx + 16 + offset) * SCALE, 790 * SCALE,
+                                    (bx + 16 + offset + fill_w) * SCALE, 796 * SCALE],
+                                   radius=3 * SCALE, fill=colour)
+        tag_w = width_of(source, "mono", 7) + 12
+        draw.rounded_rectangle([(bx + 16) * SCALE, 818 * SCALE, (bx + 16 + tag_w) * SCALE,
+                                836 * SCALE], radius=6 * SCALE, outline=LINE_STRONG, width=SCALE)
+        text((bx + 22, 823), source, "mono", 7, ACCENT if source == "IDX" else MUTED)
+
+    text((34, 906), "Pratinjau dihasilkan tools/make_preview.py dari data pasar sungguhan — "
+                    "bukan tangkapan layar. Bukan nasihat investasi.", "regular", 9, FAINT)
 
     image = image.resize((W, H), Image.LANCZOS)
     target = ASSETS / "preview.png"
