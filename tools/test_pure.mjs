@@ -6,6 +6,10 @@
 // tools/check_ui.mjs covers the live end-to-end path instead.
 //
 //   node tools/test_pure.mjs
+import { createRequire } from "node:module";
+
+// app.js is CommonJS while this file is ESM (.mjs); bridge the two.
+const require = createRequire(import.meta.url);
 const ui = require("../web/app.js");
 
 const checks = [];

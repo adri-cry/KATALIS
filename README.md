@@ -103,6 +103,11 @@ Dua centangan di bawah kotak pencarian tersimpan di browser:
 | **Grafik** (tengah) | Lilin + SMA20 + volume, sumbu waktu, garis penutupan sebelumnya, dan penanda harga terakhir yang berdenyut. **Arahkan kursor ke lilin** untuk membaca O/H/L/C, volume, perubahan, dan harga pada posisi kursor. Rentang: **1H / 5H** (intraday) sampai 2 tahun. Harga di judul bergerak mengikuti stream. |
 | **Kartu putusan** (kanan) | Rating lima tingkat, keyakinan, serta rencana: entry, stop, target, rasio R:R, jumlah lot, dan nilai rupiah. Rating AI ditampilkan berdampingan bila aktif. |
 | **Nasihat AI** | Tesis, daftar risiko, syarat yang membatalkan tesis, dan rencana versi model — beserta disclaimer. |
+| **Dewan Analis** | Lima kartu peran: skor −2…+2, bukti yang mendukung dan yang menentang, plus label sumber (`data idx` atau `proksi`). |
+| **Debat** | Argumen terkuat di kedua sisi, diambil dari bukti peran. |
+| **Risiko** | Tiga sikap: agresif, netral, konservatif — masing-masing dengan angka yang mendasarinya. |
+| **Jurnal** | Setiap keputusan, harga masuk/keluar, return, return IHSG, dan **alpha**. Tombol untuk menilai yang sudah jatuh tempo. |
+| **Portofolio** | Posisi, harga rata-rata, laba/rugi, kas, dan ekuitas. Ekuitas inilah yang dipakai menghitung ukuran posisi. |
 
 ### Realtime
 
@@ -120,11 +125,6 @@ Tombol **⟳** memaksa muat ulang tanpa menunggu cache.
 Stream ini hanya menghubungi Yahoo, **tidak memanggil model** — membuka dashboard
 tidak menambah biaya AI. Bila koneksi putus, browser menyambung ulang sendiri dan
 label `LIVE` berubah menjadi `terputus`.
-| **Dewan Analis** | Lima kartu peran: skor −2…+2, bukti yang mendukung dan yang menentang, plus label sumber (`data idx` atau `proksi`). |
-| **Debat** | Argumen terkuat di kedua sisi, diambil dari bukti peran. |
-| **Risiko** | Tiga sikap: agresif, netral, konservatif — masing-masing dengan angka yang mendasarinya. |
-| **Jurnal** | Setiap keputusan, harga masuk/keluar, return, return IHSG, dan **alpha**. Tombol untuk menilai yang sudah jatuh tempo. |
-| **Portofolio** | Posisi, harga rata-rata, laba/rugi, kas, dan ekuitas. Ekuitas inilah yang dipakai menghitung ukuran posisi. |
 
 ---
 
@@ -140,6 +140,9 @@ Lima peran membaca snapshot yang sama. Masing-masing memberi skor −2…+2:
 | Analis Fundamental | 16% | P/E, ROE, dividen — **butuh `idx`** |
 | Analis Berita | 10% | Sentimen berita Kontan/CNBC — **butuh `idx`** |
 
+Setiap skor peran dinormalkan dulu ke rentang −2…+2 menurut jumlah maksimum suku yang bisa
+dicapai peran tersebut, sehingga peran dengan banyak suku dan sedikit suku tetap sebanding —
+dan rating tidak berubah hanya karena `idx` tidak ada dan sebuah peran berpindah ke proksi.
 Skor digabung dengan bobot, lalu dipetakan ke skala lima tingkat:
 
 ```
@@ -305,6 +308,9 @@ Kode saham boleh ditulis pendek: `BBCA` otomatis menjadi `BBCA.JK`.
 
 - **Bukan nasihat investasi.** Mesin ini membaca aturan yang ditulis manusia; ia tidak
   tahu berita hari ini, tidak membaca laporan keuangan, dan tidak mengenal manajemen.
+- **Tanpa autentikasi.** Server hanya melayani komputer ini (`127.0.0.1`). Siapa pun yang
+  memakai mesin yang sama dapat memicu analisis — dan bila lapisan AI aktif, itu berarti
+  memakai kuota model Anda.
 - **Harga tertunda.** Yahoo Finance tidak real-time. Untuk eksekusi, gunakan data broker Anda.
 - **Tidak ada analisis historis.** Semua perhitungan memakai data terbaru; jurnal menilai
   ke depan, bukan menguji masa lalu. Backtest butuh arsip data yang belum ada di sini.

@@ -82,8 +82,13 @@ def _round_tick(price: float) -> float:
 
 
 def _role(key: str, name: str, score: float, bull: list[str], bear: list[str],
-          source: str, note: str = "", warning: str = "") -> dict:
-    score = round(_clamp(score), 2)
+          source: str, note: str = "", warning: str = "",
+          ceiling: float = 2.0) -> dict:
+    # Every role speaks the same ±2 language: the raw sum is divided by the
+    # largest sum its own terms can reach. Without this a 16% role that
+    # saturates easily outweighs a 34% role that rarely does — BBCA on
+    # 2026-10-26: fundamental +2.0 alone flipped Underweight into Hold.
+    score = round(_clamp(score / ceiling * 2.0), 2)
     headline = (bull[0] if score > 0 and bull
                 else bear[0] if score < 0 and bear
                 else note or "Tidak ada sinyal tegas dari data yang tersedia.")
@@ -163,7 +168,8 @@ def _role_market(snap: dict) -> dict:
             score -= 0.3
             bear.append(f"Volume {ind['vol_ratio']}x rata-rata pada hari turun: distribusi.")
 
-    return _role("market", "Analis Teknikal", score, bull, bear, source="yahoo")
+    return _role("market", "Analis Teknikal", score, bull, bear, source="yahoo",
+                 ceiling=2.35)  # 0.7+0.35+0.35+0.4+0.25+0.3
 
 
 def _role_flow(ticker: str, snap: dict) -> dict:
@@ -216,7 +222,8 @@ def _role_flow(ticker: str, snap: dict) -> dict:
         elif ratio <= 0.7:
             score -= 0.5
             bear.append(f"Volume hari turun lebih besar: rasio naik/turun {ratio}x.")
-    return _role("flow", "Analis Aliran Dana", score, bull, bear, source="proxy", warning=fallback)
+    return _role("flow", "Analis Aliran Dana", score, bull, bear, source="proxy",
+                 warning=fallback, ceiling=1.4)  # 0.9+0.5
 
 
 def _role_bandar(ticker: str, snap: dict) -> dict:
@@ -241,7 +248,8 @@ def _role_bandar(ticker: str, snap: dict) -> dict:
                              [f"Rata-rata harga bandar {_pct(float(gain))} dari harga kini."])
                     bull = ([text] + extra) if points > 0 else []
                     bear = ([text] + extra) if points < 0 else []
-                    return _role("bandar", "Analis Bandar", points, bull, bear, source="idx")
+                    return _role("bandar", "Analis Bandar", points, bull, bear,
+                                 source="idx", ceiling=1.8)
         except Exception as exc:  # noqa: BLE001
             fallback = f"data idx gagal: {str(exc)[:120]}"
 
@@ -270,7 +278,8 @@ def _role_bandar(ticker: str, snap: dict) -> dict:
         elif position > 0.85 and slope < -0.2:
             score -= 0.7
             bear.append("OBV turun saat harga di puncak rentang 52 minggu: pola distribusi.")
-    return _role("bandar", "Analis Bandar", score, bull, bear, source="proxy", warning=fallback)
+    return _role("bandar", "Analis Bandar", score, bull, bear, source="proxy",
+                 warning=fallback, ceiling=1.25)  # 0.55+0.7
 
 
 def _role_fundamental(ticker: str) -> dict:
@@ -347,7 +356,11 @@ def _role_fundamental(ticker: str) -> dict:
     if not bull and not bear:
         return _missing("fundamental", "Analis Fundamental",
                         "Data idx tersedia tetapi rasio yang dipakai tidak lengkap.")
-    return _role("fundamental", "Analis Fundamental", score, bull, bear, source="idx")
+    # ponytail: one ceiling (+2.6) covers both sides, so the bear side tops
+    # out at -1.9/2.6*2 ≈ -1.46. Split into per-side ceilings if fundamental's
+    # bear reach ever needs to match the other roles' -2.
+    return _role("fundamental", "Analis Fundamental", score, bull, bear, source="idx",
+                 ceiling=2.6)  # 0.5+0.4+0.6+0.3+0.5+0.3
 
 
 def _role_news(ticker: str) -> dict:
@@ -366,13 +379,14 @@ def _role_news(ticker: str) -> dict:
                         "Tidak ada liputan berita yang cocok untuk saham ini pekan ini.")
 
     score = data.get("score")
-    points = _clamp(float(score) * 2.5) if isinstance(score, (int, float)) else 0.0
+    points = float(score) * 2.5 if isinstance(score, (int, float)) else 0.0
     counts = (f"{int(data.get('positive') or 0)} positif, "
               f"{int(data.get('negative') or 0)} negatif, "
               f"{int(data.get('neutral') or 0)} netral dari {items} berita.")
     headline = f"Sentimen berita: {label.replace('_', ' ')} — {counts}"
     return _role("news", "Analis Berita", points,
-                 [headline] if points > 0 else [], [headline] if points < 0 else [], source="idx")
+                 [headline] if points > 0 else [], [headline] if points < 0 else [],
+                 source="idx", ceiling=2.5)
 
 
 # ---------------------------------------------------------------------------

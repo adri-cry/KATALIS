@@ -24,20 +24,40 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def bars_from(closes: list[float], volumes: list[float] | None = None) -> list[dict]:
+    """Realistic bars: open at the previous close, h/l hug the traded range.
+
+    The old helper drew h = c+2 / l = c-2, so consecutive bars always
+    overlapped: a falling series kept touching yesterday's close, RSI lost its
+    losses, and a flat series still carried ATR 4.
+    """
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     volumes = volumes or [1_000_000.0] * len(closes)
     out = []
     for index, close in enumerate(closes):
+        open_ = closes[index - 1] if index else close
         out.append({
             "t": int((start + timedelta(days=index)).timestamp()),
-            "o": close - 1, "h": close + 2, "l": close - 2, "c": close,
+            "o": open_, "h": max(open_, close), "l": min(open_, close), "c": close,
             "v": volumes[index],
         })
     return out
 
 
+def trend(start: float, step: float, n: int = 60) -> list[float]:
+    """Trending closes: a pullback every 5th session and slight acceleration.
+
+    A perfectly straight line leaves MACD hist at exactly 0, which says
+    nothing about the sign the trend tests want to check.
+    """
+    out, close = [], start
+    for i in range(n):
+        out.append(close)
+        close += step * (1 + 0.01 * i - (1.5 if i % 5 == 4 else 0.0))
+    return out
+
+
 # ---- indicators -------------------------------------------------------------
-rising = [100 + i for i in range(60)]
+rising = trend(100.0, 1.0)
 ind = market.indicators(bars_from(rising))
 check("indikator: SMA20 dihitung", ind["sma20"] is not None and ind["sma20"] > 100, str(ind["sma20"]))
 check("indikator: tren naik -> RSI tinggi", (ind["rsi14"] or 0) > 70, str(ind["rsi14"]))
@@ -45,7 +65,7 @@ check("indikator: MACD positif saat naik", (ind["macd_hist"] or 0) > 0, str(ind[
 check("indikator: ATR positif", (ind["atr14"] or 0) > 0, str(ind["atr14"]))
 check("indikator: posisi 52 minggu di ujung atas", (ind["pos_52w"] or 0) > 0.9, str(ind["pos_52w"]))
 
-falling = [200 - i for i in range(60)]
+falling = trend(200.0, -1.0)
 ind_down = market.indicators(bars_from(falling))
 check("indikator: tren turun -> RSI rendah", (ind_down["rsi14"] or 100) < 30, str(ind_down["rsi14"]))
 check("indikator: MACD negatif saat turun", (ind_down["macd_hist"] or 0) < 0)
@@ -53,7 +73,7 @@ check("indikator: MACD negatif saat turun", (ind_down["macd_hist"] or 0) < 0)
 flat = [100.0] * 60
 ind_flat = market.indicators(bars_from(flat))
 check("indikator: harga datar tidak membagi nol",
-      ind_flat["sma20"] == 100 and ind_flat["atr14"] == 0, f"sma={ind_flat['sma20']}")
+      ind_flat["sma20"] == 100 and not ind_flat["atr14"], f"sma={ind_flat['sma20']}")
 
 short = market.indicators(bars_from([100, 101, 102]))
 check("indikator: seri pendek memberi None, bukan angka palsu",
@@ -91,6 +111,33 @@ check("keyakinan: peran tanpa data menurunkan keyakinan",
 
 check("bobot: jumlah bobot peran = 1", abs(sum(desk._WEIGHTS.values()) - 1) < 1e-9)
 check("bobot: lima peran dikenal", set(desk._WEIGHTS) == {"market", "flow", "bandar", "fundamental", "news"})
+
+# ---- role scaling ------------------------------------------------------------
+# Jalur proksi dipaksa agar uji tetap offline: biner idx yang terpasang akan
+# memanggil jaringan, dan CI tidak punya biner itu.
+desk.idxbridge.available = lambda: False
+
+check("skala: _role menormalkan ceiling ke ±2",
+      desk._role("x", "X", 1.4, [], [], "t", ceiling=1.4)["score"] == 2.0
+      and desk._role("x", "X", -0.7, [], [], "t", ceiling=1.4)["score"] == -1.0)
+
+bull = {"indicators": {
+    "last": 120.0, "sma20": 110.0, "sma50": 100.0, "sma200": 90.0,
+    "rsi14": 60.0, "macd_hist": 1.0, "bb_pct_b": -0.1,
+    "vol_ratio": 2.0, "change_pct": 2.0,
+    "obv_slope": 0.8, "up_down_volume": 1.6,
+    "mfi14": 60.0, "pos_52w": 0.2,
+}}
+saturated = {
+    "market": desk._role_market(bull),
+    "flow": desk._role_flow("BBCA", bull),
+    "bandar": desk._role_bandar("BBCA", bull),
+}
+for key, role in saturated.items():
+    check(f"skala: peran {key} bull maksimum menyentuh kisaran atas",
+          role["available"] and role["score"] >= 1.8, str(role["score"]))
+check("skala: tidak ada peran yang melampaui ±2",
+      all(abs(role["score"]) <= 2.0 for role in saturated.values()))
 
 # ---- plan -------------------------------------------------------------------
 plan = desk._plan({"last": 5000.0, "atr14": 100.0}, "Buy", equity=50_000_000)

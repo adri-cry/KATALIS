@@ -16,6 +16,7 @@ import sys
 import time
 import traceback
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,14 +54,21 @@ def quotes(symbols: list[str]) -> list[dict]:
     return rows
 
 
+def _price_of(symbol: str, fallback: float) -> float:
+    try:
+        return market.chart(symbol, "1mo")["price"]
+    except market.MarketError:
+        return fallback
+
+
 def portfolio_view() -> dict:
+    stored = store.positions()
+    # N positions mean N round-trips to the price source; a small pool turns
+    # N sequential waits into roughly one.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        prices = list(pool.map(lambda p: _price_of(p["symbol"], p["avg_price"]), stored))
     positions, market_value, cost_total = [], 0.0, 0.0
-    for position in store.positions():
-        price = position["avg_price"]
-        try:
-            price = market.chart(position["symbol"], "1mo")["price"]
-        except market.MarketError:
-            pass
+    for position, price in zip(stored, prices):
         value = price * position["quantity"]
         cost = position["avg_price"] * position["quantity"]
         pnl = value - cost
