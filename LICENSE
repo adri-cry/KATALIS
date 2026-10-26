@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Catatan lisensi pihak ketiga
-
-KATALIS memakai gagasan dan pola dari dua proyek sumber terbuka. Kode mereka
-tidak disertakan di repo ini (lihat .gitignore), tetapi bila Anda mengambilnya
-lewat tools/fetch_repos.mjs, lisensi berikut berlaku untuk berkas-berkas itu:
-
-- TradingAgents — Apache License 2.0
-  https://github.com/TauricResearch/TradingAgents
-- idx — MIT License
-  https://github.com/fzn0x/idx
