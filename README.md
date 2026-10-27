@@ -288,10 +288,61 @@ jadi biaya praktis tetap).
 
 ---
 
+## Pemindai: saham mana yang layak dibeli
+
+Dashboard menganalisis **satu** saham yang Anda pilih. Pemindai menjawab pertanyaan
+sebaliknya: dari sebuah daftar saham, mana yang layak dibeli sekarang.
+
+```bash
+cp universe.example.txt data/universe.txt     # lalu ganti isinya dengan LQ45/IDX30 terbaru
+python -m core.screener                       # universe, jika kosong watchlist
+python -m core.screener BBCA BBRI TLKM --no-ai
+python -m core.screener --top 3 --record      # catat pilihan ke jurnal agar dinilai vs IHSG
+```
+
+Lewat HTTP: `POST /api/screen` dengan `{"symbols": [...], "max_picks": 5, "ai": true, "record": false}`.
+
+Tiga tahap, yang murah lebih dulu — satu permintaan harga per saham, analisis penuh
+hanya untuk shortlist, dan **satu** panggilan model untuk semuanya:
+
+| Tahap | Dikerjakan | Yang ditolak |
+|---|---|---|
+| 1. Gerbang | kode | nilai transaksi harian < Rp1 miliar, harga < Rp100, ATR > 7%, riwayat < 120 sesi, data terakhir > 7 hari lalu, lalu skor teknikal ≤ 0. Sisanya diurutkan; `shortlist` teratas (default 15) lanjut |
+| 2. Dewan | kode (`desk.analyse`) | rating mesin di bawah Overweight |
+| 3. Model | satu panggilan | kandidat yang diturunkan model ke Hold atau lebih rendah; model boleh mengembalikan **nol** pilihan |
+
+Batas gerbang ada di `Gate` (`core/screener.py`). Setiap saham yang ditolak tercatat
+beserta tahap dan alasannya (`rejected`), dan saham yang gagal diambil masuk `errors` —
+tidak ada yang hilang diam-diam.
+
+Aturan yang dijaga kode, bukan hanya prompt:
+
+- Model hanya menilai kandidat yang ia terima; kode saham karangan dibuang dan dilaporkan.
+- Hanya rating Buy/Overweight dari model yang bisa jadi pilihan, dan jumlahnya dibatasi `max_picks`.
+- **Entry, stop, dan target selalu dari mesin**; model tidak pernah memberi level harga.
+- Bila model mati atau gagal, pilihan jatuh ke urutan mesin dan `picks_source` berubah
+  dari `model` menjadi `mesin`, dengan alasannya di `ai.error`.
+- Dengan `--record`, hanya pilihan yang dicatat, dan vonis model disimpan di kolom AI
+  jurnal — jadi mesin vs model dinilai terpisah, sama seperti analisis biasa.
+
+Batas yang perlu diketahui:
+
+- Shortlist diurutkan menurut **skor teknikal** (cocok untuk horizon 5 sesi di jurnal).
+  Saham dengan fundamental bagus tetapi tren lemah tidak akan lolos; naikkan `--shortlist`
+  atau ubah sendiri tahap 1 bila horizon Anda lebih panjang.
+- Status UMA, suspensi, dan papan pemantauan khusus **tidak terbaca** dari data harga.
+  Periksa sendiri di idx.co.id sebelum membeli.
+- Tanpa biner `idx`, kandidat hanya bertumpu pada proksi harga/volume, dan itu
+  ditandai di `flags` serta diberitahukan ke model agar keyakinannya turun.
+- Yahoo membatasi permintaan beruntun; universe 40 saham wajar memakan beberapa puluh detik.
+
+---
+
 ## API
 
 | Endpoint | Guna |
 |---|---|
+| `POST /api/screen` | `{"symbols": [], "max_picks": 5, "shortlist": 15, "ai": null, "record": false}` → kandidat, pilihan, saham yang ditolak beserta alasannya |
 | `GET /api/health` | Versi, benchmark, status `idx`, ringkasan jurnal |
 | `GET /api/watchlist` / `POST` | Daftar + harga; `{"add": ["ANTM.JK"]}` atau `{"remove": "..."}` |
 | `GET /api/market?symbol=&range=` | Bar OHLCV + indikator |
@@ -346,6 +397,7 @@ katalis/
     idxbridge.py         jembatan opsional ke biner idx
     llm.py               klien OpenAI (hanya pustaka standar)
     advisor.py           prompt + validasi jawaban model
+    screener.py          pemindai: gerbang kode -> dewan -> satu panggilan model
   web/
     index.html app.js styles.css    dashboard (tanpa framework, tanpa build)
   tools/

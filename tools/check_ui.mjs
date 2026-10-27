@@ -1,4 +1,4 @@
-﻿// Headless check of the dashboard's renderers.
+// Headless check of the dashboard's renderers.
 //
 // There is no browser here, so the page cannot be opened and screenshotted.
 // What can be checked is what matters: the renderers turn a real analysis
@@ -100,6 +100,36 @@ if (analysis.ai) {
 // wireEvents() touches are expected to be in the static HTML.
 const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
 const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+ui.state.screener = { result: null, busy: false, symbols: "", maxPicks: 5, shortlist: 15, ai: false, record: false };
+const screenIdle = ui.viewScreener();
+check("pemindai: panel kosong dan AI mati secara default",
+  screenIdle.includes('id="screen-form"') && screenIdle.includes("universe.txt / watchlist")
+  && !screenIdle.includes('id="screen-ai" type="checkbox" checked'));
+ui.state.screener.result = {
+  as_of: "2026-10-27", universe: 2, picks: [], picks_source: "model", market_note: "dua saham melemah",
+  ai: { used: true, dropped: [], unassessed: [] }, rejected: [
+    { symbol: "ZZZZ.JK", stage: "gerbang", reasons: ["<img src=x>"] },
+  ], errors: [], recorded: [], elapsed_s: 1.2, disclaimer: "bukan nasihat",
+  candidates: [{ symbol: "BBCA.JK", name: "<script>alert(1)</script>", pick: false,
+    mechanical: { rating: "Overweight", composite: 0.42 }, ai: { rating: "Hold" },
+    plan: { entry: 9000, stop: 8500, target: 10000 }, flags: ["tanpa data: berita"] }],
+};
+const screenHtml = ui.viewScreener();
+check("pemindai: nol pilihan dan rating mesin/model tampil",
+  screenHtml.includes("Nol pilihan adalah hasil yang sah") && screenHtml.includes("Overweight")
+  && screenHtml.includes("Hold") && screenHtml.includes("model"));
+check("pemindai: entry/stop/target hasil mesin tampil",
+  screenHtml.includes("9.000") && screenHtml.includes("8.500") && screenHtml.includes("10.000"));
+check("pemindai: alasan penolakan dan escape tampil",
+  screenHtml.includes("Ditolak (1)") && screenHtml.includes("gerbang")
+  && !screenHtml.includes("<script>") && !screenHtml.includes("<img src=x>"));
+ui.state.screener.result = null;
+check("analisis: progress, durasi, dan keterangan AI tersedia",
+  source.includes("analysisProgressView") && source.includes("padStart(2, \"0\")")
+  && source.includes("halaman ter-refresh") && source.includes('role="status"')
+  && source.includes("/api/analyze/status?id=")
+  && source.includes("Older running server has only the original synchronous endpoint")
+  && source.includes("/api/analyze/start"));
 const wiring = source.match(/function wireEvents\(\)\s*\{([\s\S]*?)\n\}/)?.[1] || "";
 const ids = [...new Set([...wiring.matchAll(/\$\("#([a-z0-9-]+)"\)/g)].map((match) => match[1]))];
 const missing = ids.filter((id) => !html.includes(`id="${id}"`));

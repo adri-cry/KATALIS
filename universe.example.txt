@@ -1,0 +1,22 @@
+# Contoh awal daftar saham untuk pemindai. Salin ke data/universe.txt lalu
+# GANTI dengan daftar LQ45 / IDX30 resmi terbaru dari idx.co.id: komposisi indeks
+# berubah tiap semester, dan daftar ini ditulis tangan, bukan diambil dari sumber resmi.
+#
+# Format: satu atau beberapa kode per baris, dipisah spasi atau koma. "#" memulai komentar.
+# Gerbang pemindai tetap menolak saham yang ilikuid, terlalu murah, atau datanya basi,
+# jadi daftar yang agak lebar tidak berbahaya, hanya lebih lambat.
+
+# perbankan
+BBCA BBRI BMRI BBNI BRIS
+
+# telekomunikasi & infrastruktur
+TLKM EXCL ISAT TOWR JSMR PGAS
+
+# konsumer
+ICBP INDF UNVR KLBF CPIN AMRT
+
+# energi & tambang
+ADRO PTBA ITMG ANTM INCO MDKA
+
+# lainnya
+ASII UNTR SMGR INKP GOTO

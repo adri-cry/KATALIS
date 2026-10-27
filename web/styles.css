@@ -284,6 +284,27 @@ button.spin { animation: spin .8s linear infinite; }
 /* ---------- verdict ---------- */
 
 .verdict { padding: 0; }
+.analysis-progress {
+  display: flex; align-items: flex-start; gap: 13px; padding: 24px 20px;
+  min-height: 150px; background: linear-gradient(135deg, rgba(240,180,41,.07), transparent 65%);
+}
+.analysis-progress-body { flex: 1; min-width: 0; display: grid; gap: 8px; }
+.analysis-progress-body strong { font-size: 13px; line-height: 1.5; }
+.analysis-progress-body p { font-size: 11.5px; line-height: 1.5; }
+.analysis-spinner {
+  width: 22px; height: 22px; flex: 0 0 22px; margin-top: 2px;
+  border: 2px solid rgba(240,180,41,.2); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite;
+}
+.analysis-progress-track { height: 4px; overflow: hidden; border-radius: 99px; background: var(--panel-2); margin-top: 3px; }
+.analysis-progress-track i {
+  display: block; height: 100%; width: 38%; border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-dim), #f6c745);
+  animation: progress-travel 1.8s ease-in-out infinite alternate;
+}
+@keyframes progress-travel { from { transform: translateX(-70%); } to { transform: translateX(240%); } }
+
+.verdict { padding: 0; }
 .empty { padding: 34px 22px; text-align: center; display: grid; gap: 8px; }
 .empty-mark { font-size: 30px; color: var(--accent-dim); }
 
@@ -436,6 +457,52 @@ tr:hover td { background: rgba(255,255,255,.02); }
 .stat { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 14px; background: var(--panel); }
 .stat .k { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .stat .v { font-family: var(--mono); font-size: 17px; margin-top: 2px; }
+
+/* ---------- screener ---------- */
+
+.screen-panel { display: grid; gap: 14px; }
+.screen-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.screen-head h2 { font-size: 17px; margin-bottom: 4px; }
+.screen-head p { max-width: 720px; font-size: 12px; }
+.screen-controls {
+  display: flex; align-items: end; gap: 10px; flex-wrap: wrap;
+  padding: 13px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel);
+}
+.screen-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.screen-controls .screen-universe { flex: 1 1 280px; }
+.screen-controls input:not([type="checkbox"]) {
+  width: 110px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font: 12px var(--mono); outline: none;
+}
+.screen-controls .screen-universe input { width: 100%; }
+.screen-controls input:focus { border-color: var(--accent-dim); }
+.screen-controls .toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
+.screen-controls .toggle input { accent-color: var(--accent); }
+.screen-controls button:disabled { opacity: .55; cursor: wait; }
+.screen-caveat, .screen-disclaimer { font-size: 11px; }
+.screen-results { display: grid; gap: 12px; }
+.screen-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.screen-summary .stat { padding: 9px 11px; }
+.screen-summary .stat .v { font-size: 14px; }
+.screen-market, .screen-pickline, .screen-error {
+  padding: 11px 13px; border-radius: 9px; background: var(--panel); border: 1px solid var(--line-soft);
+  font-size: 12.5px;
+}
+.screen-pickline { border-color: rgba(34,197,94,.25); }
+.screen-error { color: #fca5a5; border-color: rgba(239,68,68,.3); }
+.screen-table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 10px; }
+.screen-table { min-width: 950px; }
+.screen-table td { vertical-align: top; }
+.screen-table .rating-pill { font-size: 9px; padding: 3px 7px; letter-spacing: .06em; }
+.screen-picked td { background: rgba(34,197,94,.035); }
+.screen-name { display: block; font-size: 10px; }
+.screen-flags { min-width: 150px; max-width: 260px; }
+.screen-flags .tag { display: inline-block; margin: 0 3px 4px 0; white-space: normal; }
+.screen-details { border: 1px solid var(--line-soft); border-radius: 9px; padding: 10px 13px; background: var(--panel); }
+.screen-details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.screen-details ul { margin: 9px 0 0; padding-left: 20px; color: #b7c7d4; font-size: 12px; }
+.screen-details li { margin: 5px 0; }
+.screen-recorded { font-size: 11px; }
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 .toolbar input {

@@ -88,6 +88,32 @@ check("panel kosong: menyebut tombol Analisis", ui.viewIdle().includes("Analisis
 check("panel kosong: menyebut simbol", ui.viewIdle().includes(ui.state.symbol));
 check("dewan: bergantung pada analisis", ui.viewRoles().includes("Analisis"));
 
+// ---- screener panel ----------------------------------------------------------
+ui.state.screener = { result: null, busy: false, symbols: "", maxPicks: 5, shortlist: 15, ai: false, record: false };
+const emptyScreen = ui.viewScreener();
+check("pemindai: panel memuat form dan AI default mati",
+  emptyScreen.includes('id="screen-form"') && emptyScreen.includes("screen-ai")
+  && !emptyScreen.includes('id="screen-ai" type="checkbox" checked'));
+ui.state.screener.result = {
+  as_of: "2026-10-27", universe: 2, picks: [], picks_source: "model", market_note: "netral",
+  ai: { used: true, dropped: [], unassessed: [] }, rejected: [
+    { symbol: "ZZZZ.JK", stage: "gerbang", reasons: ["<img src=x>"] },
+  ], errors: [], recorded: [], elapsed_s: 1.2, disclaimer: "bukan nasihat",
+  candidates: [{ symbol: "BBCA.JK", name: "<script>alert(1)</script>", pick: false,
+    mechanical: { rating: "Overweight", composite: 0.42 }, ai: { rating: "Hold" },
+    plan: { entry: 9000, stop: 8500, target: 10000 }, flags: ["tanpa data: berita"] }],
+};
+const screenHtml = ui.viewScreener();
+check("pemindai: hasil nol pilihan, sumber model, dan rating dirender",
+  screenHtml.includes("Nol pilihan adalah hasil yang sah") && screenHtml.includes("model")
+  && screenHtml.includes("Overweight") && screenHtml.includes("Hold"));
+check("pemindai: level entry/stop/target dirender dari hasil mesin",
+  screenHtml.includes("9.000") && screenHtml.includes("8.500") && screenHtml.includes("10.000"));
+check("pemindai: alasan penolakan dirender", screenHtml.includes("Ditolak (1)") && screenHtml.includes("gerbang"));
+check("pemindai: teks tidak tepercaya di-escape", !screenHtml.includes("<script>")
+  && !screenHtml.includes("<img src=x>") && screenHtml.includes("&lt;script&gt;"));
+ui.state.screener.result = null;
+
 // ---- report -----------------------------------------------------------------
 let failed = 0;
 for (const item of checks) {

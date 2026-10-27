@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from . import idxbridge, market
@@ -394,6 +395,26 @@ def _role_news(ticker: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _analyse_roles(ticker: str, snap: dict) -> list[dict]:
+    """Evaluate independent evidence sources concurrently, preserving role order.
+
+    Market data is already in ``snap``; the other roles may each invoke the
+    optional IDX CLI and wait on network-backed sources. Running those reads in
+    parallel keeps total wait near the slowest source instead of their sum.
+    """
+    market_role = _role_market(snap)  # purely local; keep external concurrency bounded
+    tasks = (
+        lambda: _role_flow(ticker, snap),
+        lambda: _role_bandar(ticker, snap),
+        lambda: _role_fundamental(ticker),
+        lambda: _role_news(ticker),
+    )
+    # IDX may refuse bursts, so two workers reduce serial waiting without
+    # launching all remote CLI calls at once. pool.map preserves evidence order.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="katalis-role") as pool:
+        return [market_role, *pool.map(lambda task: task(), tasks)]
+
+
 def _rating(composite: float) -> str:
     if composite >= 0.9:
         return "Buy"
@@ -475,13 +496,7 @@ def analyse(ticker: str, range_: str = "6mo", holding_days: int = 5,
     snap = market.snapshot(ticker, range_)
     ind = snap["indicators"]
 
-    roles = [
-        _role_market(snap),
-        _role_flow(ticker, snap),
-        _role_bandar(ticker, snap),
-        _role_fundamental(ticker),
-        _role_news(ticker),
-    ]
+    roles = _analyse_roles(ticker, snap)
 
     available = [r for r in roles if r["available"]]
     total_weight = sum(_WEIGHTS[r["key"]] for r in available) or 1.0

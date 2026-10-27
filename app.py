@@ -13,20 +13,46 @@ import json
 import mimetypes
 import os
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from core import advisor, desk, idxbridge, journal, llm, market, store
+from core import advisor, desk, idxbridge, journal, llm, market, screener, store
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 VERSION = "1.2.0"
 WIB = timezone(timedelta(hours=7))
+
+_ANALYSIS_LOCK = threading.Lock()
+_ANALYSIS_JOBS: dict[str, dict] = {}
+_ANALYSIS_JOB_TTL = 60 * 60
+
+
+def _analysis_job(job_id: str, *, updates: dict | None = None) -> dict | None:
+    now = time.time()
+    with _ANALYSIS_LOCK:
+        for key, job in list(_ANALYSIS_JOBS.items()):
+            if job.get("updated_at", now) < now - _ANALYSIS_JOB_TTL:
+                _ANALYSIS_JOBS.pop(key, None)
+        job = _ANALYSIS_JOBS.get(job_id)
+        if job is None:
+            return None
+        if job.get("status") == "running" and now - job.get("updated_at", now) > 600:
+            job.update({"status": "error", "stage": "error",
+                        "message": "Proses analisis berhenti atau server dimulai ulang.",
+                        "error": "status analisis kedaluwarsa"})
+            job["updated_at"] = now
+        if updates:
+            job.update(updates)
+            job["updated_at"] = now
+        return dict(job)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +105,59 @@ def portfolio_view() -> dict:
     cash = store.cash()
     return {"positions": positions, "market_value": market_value, "cost": cost_total,
             "pnl": market_value - cost_total, "cash": cash, "equity": market_value + cash}
+
+
+def _execute_analysis(symbol: str, holding: int, range_: str, want_ai: bool,
+                      progress=None) -> dict:
+    """One analysis run shared by the legacy synchronous and job endpoints."""
+    portfolio = portfolio_view()
+    if progress:
+        progress("market", "Mengambil harga dan menghitung analisis pasar…")
+    analysis = desk.analyse(symbol, range_, holding, equity=portfolio["equity"])
+
+    ai_block, ai_error = None, None
+    if want_ai:
+        if progress:
+            progress("ai", "Data analis siap; menunggu jawaban model AI…")
+        try:
+            ai_block = advisor.advise(analysis, portfolio)
+        except llm.LLMError as exc:
+            ai_error = str(exc)
+    analysis["ai"] = ai_block
+    analysis["ai_error"] = ai_error
+
+    if progress:
+        progress("save", "Menyimpan hasil analisis…")
+    decision_id = store.record(
+        analysis["symbol"], analysis["as_of"], analysis["decision"]["rating"],
+        analysis["price"], market.BENCHMARK, holding,
+        {"rating": analysis["decision"]["rating"],
+         "confidence": analysis["decision"]["confidence"],
+         "composite": analysis["manager"]["composite"],
+         "price": analysis["price"], "as_of": analysis["as_of"],
+         "summary": analysis["decision"]["summary"]},
+        {"roles": analysis["roles"], "debate": analysis["debate"],
+         "manager": analysis["manager"], "trader": analysis["trader"],
+         "risk": analysis["risk"], "decision": analysis["decision"]},
+        ai=ai_block,
+    )
+    analysis["recorded"] = decision_id
+    return analysis
+
+
+def _background_analysis(job_id: str, symbol: str, holding: int, range_: str,
+                         want_ai: bool) -> None:
+    def progress(stage: str, message: str) -> None:
+        _analysis_job(job_id, updates={"stage": stage, "message": message})
+    try:
+        result = _execute_analysis(symbol, holding, range_, want_ai, progress)
+        _analysis_job(job_id, updates={"status": "complete", "stage": "complete",
+                                       "message": "Analisis selesai.", "result": result})
+    except Exception as exc:  # noqa: BLE001
+        if os.environ.get("KATALIS_LOG"):
+            traceback.print_exc()
+        _analysis_job(job_id, updates={"status": "error", "stage": "error",
+                                       "message": f"Analisis gagal: {exc}", "error": str(exc)})
 
 
 def health() -> dict:
@@ -157,6 +236,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/health":
                 return self._json(health())
+            if route == "/api/analyze/status":
+                job_id = self._query().get("id") or ""
+                job = _analysis_job(job_id)
+                if job is None:
+                    return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
+                return self._json({key: value for key, value in job.items() if key not in ("result", "error")})
+            if route.startswith("/api/analyze/"):
+                return self._error("unknown endpoint", 404)
             if route == "/api/watchlist":
                 symbols = store.watchlist()
                 return self._json({"symbols": symbols, "quotes": quotes(symbols)})
@@ -226,39 +313,58 @@ class Handler(BaseHTTPRequestHandler):
                 if not symbol:
                     return self._error("symbol is required")
                 holding = int(body.get("holding_days") or 5)
-                portfolio = portfolio_view()
-                analysis = desk.analyse(symbol, body.get("range") or "6mo", holding,
-                                        equity=portfolio["equity"])
-
-                # The desk's numbers stand on their own; the model only reads
-                # them. A failure here is reported, never filled in.
                 want_ai = body.get("ai")
                 if want_ai is None:
                     want_ai = llm.status()["configured"]
-                ai_block, ai_error = None, None
-                if want_ai:
-                    try:
-                        ai_block = advisor.advise(analysis, portfolio)
-                    except llm.LLMError as exc:
-                        ai_error = str(exc)
-                analysis["ai"] = ai_block
-                analysis["ai_error"] = ai_error
-
-                decision_id = store.record(
-                    analysis["symbol"], analysis["as_of"], analysis["decision"]["rating"],
-                    analysis["price"], market.BENCHMARK, holding,
-                    {"rating": analysis["decision"]["rating"],
-                     "confidence": analysis["decision"]["confidence"],
-                     "composite": analysis["manager"]["composite"],
-                     "price": analysis["price"], "as_of": analysis["as_of"],
-                     "summary": analysis["decision"]["summary"]},
-                    {"roles": analysis["roles"], "debate": analysis["debate"],
-                     "manager": analysis["manager"], "trader": analysis["trader"],
-                     "risk": analysis["risk"], "decision": analysis["decision"]},
-                    ai=ai_block,
-                )
-                analysis["recorded"] = decision_id
+                analysis = _execute_analysis(symbol, holding, body.get("range") or "6mo", bool(want_ai))
                 return self._json(analysis)
+
+            if route == "/api/analyze/start":
+                symbol = market.normalise(body.get("symbol") or "")
+                if not symbol:
+                    return self._error("symbol is required")
+                job_id = uuid.uuid4().hex
+                holding = int(body.get("holding_days") or 5)
+                want_ai = body.get("ai")
+                if want_ai is None:
+                    want_ai = llm.status()["configured"]
+                job = {"id": job_id, "symbol": symbol, "status": "running", "stage": "queue",
+                       "message": "Menyiapkan analisis…", "started_at": time.time(),
+                       "updated_at": time.time()}
+                with _ANALYSIS_LOCK:
+                    _ANALYSIS_JOBS[job_id] = job
+                worker = threading.Thread(
+                    target=_background_analysis,
+                    args=(job_id, symbol, holding, body.get("range") or "6mo", bool(want_ai)),
+                    name=f"analysis-{job_id[:8]}", daemon=True)
+                worker.start()
+                return self._json({key: value for key, value in job.items() if key != "result"}, 202)
+
+            if route == "/api/analyze/result":
+                job_id = self._query().get("id") or ""
+                job = _analysis_job(job_id)
+                if job is None:
+                    return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
+                if job["status"] == "error":
+                    return self._error(job.get("error") or "analisis gagal", 500)
+                if job["status"] != "complete":
+                    return self._json({"status": job["status"], "stage": job["stage"]}, 202)
+                return self._json(job["result"])
+
+            if route == "/api/screen":
+                # Slow by nature: one Yahoo request per ticker, idx lookups for the shortlist,
+                # and at most one model call. `ai` omitted = use the model if one is configured.
+                symbols = body.get("symbols") or []
+                if isinstance(symbols, str):
+                    symbols = [symbols]
+                return self._json(screener.screen(
+                    [str(s) for s in symbols] or None,
+                    max_picks=int(body.get("max_picks") or 5),
+                    shortlist=int(body.get("shortlist") or 15),
+                    ai=body.get("ai"),
+                    record=bool(body.get("record")),
+                    holding_days=int(body.get("holding_days") or 5),
+                ))
 
             if route == "/api/settle":
                 return self._json(journal.settle_all(body.get("holding_days")))

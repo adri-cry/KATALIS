@@ -7,8 +7,11 @@ const state = {
   range: "6mo",
   tab: "roles",
   analysis: null,
+  analysisJob: null,
+  analysisTimer: null,
   journal: null,
   portfolio: null,
+  screener: { result: null, busy: false, symbols: "", maxPicks: 5, shortlist: 15, ai: false, record: false },
   health: null,
   chart: null,
   bars: [],
@@ -38,6 +41,16 @@ const prefs = {
   set auto(value) { this._write("katalis.auto", value ? "1" : "0"); },
   get ai() { return this._read("katalis.ai", "1") === "1"; },
   set ai(value) { this._write("katalis.ai", value ? "1" : "0"); },
+  get analysisJob() {
+    try { return JSON.parse(sessionStorage.getItem("katalis.analysisJob") || "null"); }
+    catch { return null; }
+  },
+  set analysisJob(value) {
+    try {
+      if (value) sessionStorage.setItem("katalis.analysisJob", JSON.stringify(value));
+      else sessionStorage.removeItem("katalis.analysisJob");
+    } catch { /* storage may be unavailable */ }
+  },
 };
 
 /* ---------- formatting ---------- */
@@ -94,6 +107,10 @@ function normaliseSymbol(raw) {
 
 async function boot() {
   wireEvents();
+  if ($$("#tabs button").some((button) => button.dataset.tab === "screener")) {
+    const tab = document.querySelector('#tabs button[data-tab="screener"]');
+    if (tab) tab.title = "Saring beberapa saham sekaligus lewat gerbang, dewan analis, dan model opsional.";
+  }
   tickClock();
   setInterval(tickClock, 1000);
 
@@ -117,11 +134,19 @@ async function boot() {
   setInterval(loadBenchmark, 60000);
   window.addEventListener("beforeunload", stopLive);
 
+  const savedJob = prefs.analysisJob;
+
   // Opening the dashboard used to run a full analysis, which — once the model
   // was connected — meant one paid call per refresh, for a symbol nobody asked
   // about. It now loads prices only; the desk runs on the button, or on open
   // when the operator ticks "otomatis".
-  await openSymbol(state.symbol, { analyse: prefs.auto });
+  if (savedJob) {
+    await openSymbol(state.symbol);
+    const resumed = await resumeAnalysisJob(savedJob);
+    if (!resumed) prefs.analysisJob = null;
+  } else {
+    await openSymbol(state.symbol, { analyse: prefs.auto });
+  }
 }
 
 function tickClock() {
@@ -283,13 +308,17 @@ async function openSymbol(symbol, { analyse = false } = {}) {
   $("#symbol").value = state.symbol;
   $$(".wrow").forEach((row) => row.classList.toggle("on", row.dataset.symbol === state.symbol));
   startLive(state.symbol);        // the stream starts first: a live price often lands before the chart
-  await loadMarket(state.symbol, state.range);
+  // Chart and desk both use the server-side market cache, but neither needs the
+  // other to finish. Run them together instead of making analysis wait for the
+  // chart HTTP round-trip first.
+  const tasks = [loadMarket(state.symbol, state.range)];
   if (analyse) {
-    await runAnalysis();
+    tasks.push(runAnalysis());
   } else {
     // Selecting a symbol costs nothing; running the desk is a separate click.
     paintIdleVerdict();
   }
+  await Promise.all(tasks);
 }
 
 async function loadMarket(symbol, range, { fresh = false } = {}) {
@@ -738,25 +767,144 @@ function axisLabel(stamp, interval, timeZone) {
 
 /* ---------- analysis ---------- */
 
-async function runAnalysis() {
+function analysisProgressView(job) {
+  const labels = {
+    queue: "Menyiapkan analisis…",
+    market: "Mengambil harga dan menghitung peran analis…",
+    ai: "Menunggu model AI menyusun tesis dan risiko…",
+    save: "Menyimpan hasil analisis…",
+  };
+  const startedAt = job.started_at ? (job.started_at > 1e12 ? job.started_at : job.started_at * 1000) : Date.now();
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  return `<div class="analysis-progress" role="status" aria-live="polite">
+    <span class="analysis-spinner" aria-hidden="true"></span>
+    <div class="analysis-progress-body">
+      <strong>${esc(job.message || labels[job.stage] || "Analisis sedang berjalan…")}</strong>
+      <p class="muted">${esc(job.symbol || state.symbol)} · berjalan ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}</p>
+      ${job.stage === "ai" ? '<p class="muted">Bagian ini bergantung pada kecepatan layanan model. Jika halaman ter-refresh, status akan dilanjutkan selama server tetap berjalan.</p>' : ""}
+      <div class="analysis-progress-track"><i></i></div>
+    </div>
+  </div>`;
+}
+
+function paintAnalysisProgress(job) {
+  const verdict = $("#verdict");
+  if (verdict) verdict.innerHTML = analysisProgressView(job);
   const button = $("#analyse");
-  button.disabled = true;
-  button.textContent = "Menganalisis…";
-  try {
-    const payload = await api("/api/analyze", {
-      method: "POST",
-      body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
-    });
-    state.analysis = payload;
-    paintVerdict(payload);
-    paintPanel(state.tab);
-    if (payload.recorded) toast(`Keputusan tersimpan di jurnal (#${payload.recorded}).`);
-  } catch (error) {
-    toast(`Analisis gagal: ${error.message}`, true);
-    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
-  } finally {
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Menganalisis…";
+  }
+}
+
+function finishAnalysisJob() {
+  if (state.analysisTimer) {
+    clearTimeout(state.analysisTimer);
+    clearInterval(state.analysisTimer);
+  }
+  state.analysisTimer = null;
+  state.analysisJob = null;
+  prefs.analysisJob = null;
+  const button = $("#analyse");
+  if (button) {
     button.disabled = false;
     button.textContent = "Analisis";
+  }
+}
+
+async function pollAnalysisJob(job) {
+  if (!job?.id) return;
+  state.analysisJob = job;
+  paintAnalysisProgress(job);
+  try {
+    const status = await api(`/api/analyze/status?id=${encodeURIComponent(job.id)}`);
+    Object.assign(job, status);
+    state.analysisJob = job;
+    prefs.analysisJob = job;
+    if (status.status === "complete") {
+      const payload = await api(`/api/analyze/result?id=${encodeURIComponent(job.id)}`);
+      finishAnalysisJob();
+      state.analysis = payload;
+      paintVerdict(payload);
+      paintPanel(state.tab);
+      if (payload.recorded) toast(`Keputusan tersimpan di jurnal (#${payload.recorded}).`);
+      return;
+    }
+    if (status.status === "error") {
+      const message = status.error || status.message || "Analisis gagal";
+      finishAnalysisJob();
+      toast(`Analisis gagal: ${message}`, true);
+      $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p></div>`;
+      return;
+    }
+    paintAnalysisProgress(job);
+  } catch (error) {
+    if (error.message.includes("tidak ditemukan") || error.message.includes("404")) {
+      finishAnalysisJob();
+      const message = "Pekerjaan analisis tidak ditemukan. Server mungkin sempat dimulai ulang; silakan tekan Analisis untuk menjalankan kembali.";
+      if ($("#verdict")) $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p></div>`;
+      return;
+    }
+    if (error.message.includes("500")) {
+      finishAnalysisJob();
+      toast(`Analisis gagal: ${error.message}`, true);
+      $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
+      return;
+    }
+    // A transient poll/network failure must not discard the in-flight job.
+  }
+  state.analysisTimer = setTimeout(() => pollAnalysisJob(job), 1200);
+}
+
+async function resumeAnalysisJob(saved = prefs.analysisJob) {
+  if (!saved?.id) return false;
+  state.analysisJob = saved;
+  paintAnalysisProgress(saved);
+  await pollAnalysisJob(saved);
+  return true;
+}
+
+async function runAnalysis() {
+  if (state.analysisJob) return;
+  const button = $("#analyse");
+  if (button) { button.disabled = true; button.textContent = "Menyiapkan…"; }
+  const job = { symbol: state.symbol, stage: "queue", status: "running", started_at: Date.now() / 1000 };
+  state.analysisJob = job;
+  paintAnalysisProgress(job);
+  try {
+    let started;
+    try {
+      started = await api("/api/analyze/start", {
+        method: "POST",
+        body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
+      });
+    } catch (error) {
+      if (!/unknown endpoint|404/i.test(error.message)) throw error;
+      // Older running server has only the original synchronous endpoint.
+      // Keep the visible progress UI and fall back instead of surfacing 404.
+      Object.assign(job, { stage: "legacy", message: "Server belum diperbarui; analisis tetap berjalan, tetapi status tidak dapat dipulihkan setelah refresh." });
+      state.analysisJob = job;
+      paintAnalysisProgress(job);
+      state.analysisTimer = setInterval(() => paintAnalysisProgress(job), 1000);
+      const payload = await api("/api/analyze", {
+        method: "POST",
+        body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
+      });
+      finishAnalysisJob();
+      state.analysis = payload;
+      paintVerdict(payload);
+      paintPanel(state.tab);
+      if (payload.recorded) toast(`Keputusan tersimpan di jurnal (#${payload.recorded}).`);
+      return;
+    }
+    Object.assign(job, started);
+    state.analysisJob = job;
+    prefs.analysisJob = job;
+    await pollAnalysisJob(job);
+  } catch (error) {
+    finishAnalysisJob();
+    toast(`Analisis gagal dimulai: ${error.message}`, true);
+    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
   }
 }
 
@@ -855,6 +1003,11 @@ function paintPanel(tab) {
   }
   if (tab === "debate") return void (panel.innerHTML = viewDebate());
   if (tab === "risk") return void (panel.innerHTML = viewRisk());
+  if (tab === "screener") {
+    panel.innerHTML = viewScreener();
+    wireScreener();
+    return;
+  }
   if (tab === "journal") return void loadJournal();
   if (tab === "portfolio") return void loadPortfolio(true);
 }
@@ -911,6 +1064,102 @@ function viewRisk() {
       <div class="stance">${esc(item.stance)}</div>
       <p>${esc(item.note)}</p></article>`).join("");
   return `<div class="risk-grid">${cards}</div>`;
+}
+
+function viewScreener() {
+  const screen = state.screener;
+  const result = screen.result;
+  const candidates = result?.candidates || [];
+  const rejected = result?.rejected || [];
+  const errors = result?.errors || [];
+  const rows = candidates.map((row) => {
+    const plan = row.plan || {};
+    const ai = row.ai;
+    return `<tr class="${row.pick ? "screen-picked" : ""}">
+      <td><strong>${row.pick ? "★ " : ""}${esc(row.symbol.replace(/\.JK$/, ""))}</strong>
+        <span class="muted screen-name">${esc(row.name || "")}</span></td>
+      <td><span class="rating-pill rating-${esc(row.mechanical?.rating)}">${esc(row.mechanical?.rating || "—")}</span></td>
+      <td class="num">${num(row.mechanical?.composite, 2)}</td>
+      <td>${ai ? `<span class="rating-pill rating-${esc(ai.rating)}">${esc(ai.rating)}</span>` : '<span class="muted">—</span>'}</td>
+      <td class="num">${rp(plan.entry)}</td><td class="num down">${rp(plan.stop)}</td><td class="num up">${rp(plan.target)}</td>
+      <td class="screen-flags">${(row.flags || []).map((flag) => `<span class="tag">${esc(flag)}</span>`).join(" ")}</td>
+    </tr>`;
+  }).join("");
+  const outcome = !result ? "" : `<section class="screen-results" aria-live="polite">
+    <div class="screen-summary">
+      <div class="stat"><div class="k">Universe</div><div class="v">${rp(result.universe)}</div></div>
+      <div class="stat"><div class="k">Pilihan</div><div class="v">${rp(result.picks?.length || 0)}</div></div>
+      <div class="stat"><div class="k">Ditolak</div><div class="v">${rp(rejected.length)}</div></div>
+      <div class="stat"><div class="k">Gagal data</div><div class="v">${rp(errors.length)}</div></div>
+      <div class="stat"><div class="k">Waktu</div><div class="v">${num(result.elapsed_s, 1)} dtk</div></div>
+      <div class="stat"><div class="k">Sumber pilihan</div><div class="v">${esc(result.picks_source || "—")}</div></div>
+    </div>
+    ${result.market_note ? `<p class="screen-market"><strong>Catatan pasar:</strong> ${esc(result.market_note)}</p>` : ""}
+    ${result.ai?.error ? `<p class="screen-error">AI gagal: ${esc(result.ai.error)} — pilihan kembali ke urutan mesin.</p>` : ""}
+    ${result.picks?.length ? `<p class="screen-pickline">Pilihan: <strong>${result.picks.map((symbol) => esc(symbol)).join(", ")}</strong></p>`
+      : `<p class="screen-pickline muted">Tidak ada yang layak dipilih pada run ini. Nol pilihan adalah hasil yang sah.</p>`}
+    <div class="screen-table-wrap"><table class="screen-table"><thead><tr>
+      <th>Saham</th><th>Rating mesin</th><th class="num">Komposit</th><th>Rating AI</th>
+      <th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Catatan data</th>
+    </tr></thead><tbody>${rows || '<tr><td colspan="8" class="muted">Tidak ada kandidat lolos ke dewan.</td></tr>'}</tbody></table></div>
+    ${rejected.length ? `<details class="screen-details"><summary>Ditolak (${rejected.length})</summary><ul>${rejected.map((item) =>
+      `<li><strong>${esc(item.symbol)}</strong> <span class="tag">${esc(item.stage)}</span> — ${esc((item.reasons || []).join("; "))}</li>`).join("")}</ul></details>` : ""}
+    ${errors.length ? `<details class="screen-details" open><summary>Gagal mengambil data (${errors.length})</summary><ul>${errors.map((item) =>
+      `<li><strong>${esc(item.symbol)}</strong> — ${esc(item.error)}</li>`).join("")}</ul></details>` : ""}
+    ${result.recorded?.length ? `<p class="muted screen-recorded">Jurnal: ${result.recorded.map((item) =>
+      `${esc(item.symbol)} ${item.id ? `tercatat #${rp(item.id)}` : "sudah tercatat hari ini"}`).join(" · ")}</p>` : ""}
+    ${result.disclaimer ? `<p class="muted screen-disclaimer">${esc(result.disclaimer)}</p>` : ""}
+  </section>`;
+
+  return `<div class="screen-panel">
+    <div class="screen-head"><div><h2>Pemindai saham</h2>
+      <p class="muted">Saring universe bertahap: gerbang harga → dewan analis → model opsional. Tidak ada pilihan juga jawaban yang sah.</p></div>
+      <span class="tag">${esc(screen.busy ? "memindai…" : result ? `tanggal ${result.as_of}` : "siap")}</span></div>
+    <form id="screen-form" class="screen-controls">
+      <label class="screen-universe">Kode saham <span class="muted">(opsional; kosong = universe.txt / watchlist)</span>
+        <input id="screen-symbols" value="${esc(screen.symbols)}" placeholder="BBCA, BBRI, TLKM" autocomplete="off" spellcheck="false"></label>
+      <label>Max pilihan <input id="screen-top" type="number" min="1" max="10" value="${esc(screen.maxPicks)}"></label>
+      <label>Shortlist <input id="screen-shortlist" type="number" min="1" max="40" value="${esc(screen.shortlist)}"></label>
+      <label class="toggle"><input id="screen-ai" type="checkbox" ${screen.ai ? "checked" : ""}> pakai AI (1 panggilan)</label>
+      <label class="toggle"><input id="screen-record" type="checkbox" ${screen.record ? "checked" : ""}> catat pilihan ke jurnal</label>
+      <button id="screen-run" class="primary" type="submit" ${screen.busy ? "disabled" : ""}>${screen.busy ? "Memindai…" : "Mulai pemindaian"}</button>
+    </form>
+    <p class="muted screen-caveat">Pemindai tidak memprediksi hasil. Periksa UMA/suspensi secara terpisah; data harga dapat tertunda. AI mati secara default agar tidak ada panggilan berbiaya tanpa pilihan Anda.</p>
+    ${outcome}
+  </div>`;
+}
+
+function wireScreener() {
+  const form = $("#screen-form");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const screen = state.screener;
+    screen.symbols = $("#screen-symbols").value.trim();
+    screen.maxPicks = Math.max(1, Math.min(10, Number($("#screen-top").value) || 5));
+    screen.shortlist = Math.max(1, Math.min(40, Number($("#screen-shortlist").value) || 15));
+    screen.ai = $("#screen-ai").checked;
+    screen.record = $("#screen-record").checked;
+    screen.busy = true;
+    paintPanel("screener");
+    try {
+      const symbols = screen.symbols ? screen.symbols.split(/[\s,;]+/).filter(Boolean) : [];
+      screen.result = await api("/api/screen", {
+        method: "POST",
+        body: JSON.stringify({ symbols, max_picks: screen.maxPicks, shortlist: screen.shortlist,
+          ai: screen.ai, record: screen.record, holding_days: 5 }),
+      });
+      toast(screen.result.picks.length
+        ? `Pemindaian selesai: ${screen.result.picks.length} pilihan (${screen.result.picks_source}).`
+        : "Pemindaian selesai: tidak ada pilihan yang lolos.");
+    } catch (error) {
+      screen.result = null;
+      toast(`Pemindaian gagal: ${error.message}`, true);
+    } finally {
+      screen.busy = false;
+      paintPanel("screener");
+    }
+  });
 }
 
 function paragraphs(text) {
@@ -1200,5 +1449,5 @@ if (typeof window !== "undefined") {
 if (typeof module !== "undefined") {
   module.exports = { renderCandles, viewRoles, viewDebate, viewRisk, viewAdvice, viewIdle,
                      aiStrip, paintVerdict, showCross, hideCross, axisLabel, fullLabel,
-                     state, prefs, esc, rp, pct };
+                     viewScreener, state, prefs, esc, rp, pct };
 }
