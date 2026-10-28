@@ -584,6 +584,43 @@ finally:
     market.chart, llm.status, llm.chat_json = real_chart, real_status, real_chat
     store.DB_PATH = real_db
 
+# ---- SQLite under concurrent writers ------------------------------------------
+# The HTTP server is threaded and the screener records from a worker pool: two
+# writes can overlap, and without WAL the loser raises "database is locked".
+import sqlite3
+import threading
+
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        store.DB_PATH = Path(tmp) / "wal.db"
+        store.init()
+        probe = sqlite3.connect(store.DB_PATH)
+        try:
+            mode = probe.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            probe.close()          # `with connect(...)` commits but never closes
+        check("store: WAL aktif", str(mode).lower() == "wal", str(mode))
+
+        errors: list[Exception] = []
+
+        def write(index: int) -> None:
+            try:
+                store.record(f"TEST{index}.JK", "2026-10-27", "Hold", 100.0,
+                             "^JKSE", 5, {"summary": "uji"}, {})
+            except Exception as exc:            # noqa: BLE001 — the failure is the assertion
+                errors.append(exc)
+
+        writers = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join()
+        check("store: delapan penulis bersamaan tidak terkunci", not errors, str(errors))
+        check("store: semua tulisan bersamaan tersimpan",
+              len(store.journal()) == 8, str(len(store.journal())))
+finally:
+    store.DB_PATH = real_db
+
 # ---- report -----------------------------------------------------------------
 failed = 0
 for name, ok, detail in CHECKS:

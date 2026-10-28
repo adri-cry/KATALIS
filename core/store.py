@@ -65,6 +65,16 @@ def _connect():
     connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
     try:
+        # The server is threaded and the screener writes from a worker pool, so a
+        # journal write can overlap another write. WAL lets readers proceed while a
+        # writer commits; busy_timeout makes the survivors wait instead of failing.
+        # A network or read-only filesystem may refuse WAL — then keep the default.
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            pass
+        connection.execute("PRAGMA busy_timeout=15000")
         yield connection
         connection.commit()
     finally:
