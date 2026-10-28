@@ -25,3 +25,4 @@ Thumbs.db
 # --- tooling artifacts -------------------------------------------------------
 acl-recovery/
 .impeccable/
+.commandcode/
