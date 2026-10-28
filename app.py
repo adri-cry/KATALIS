@@ -554,7 +554,7 @@ def main() -> None:
         raise SystemExit(1)
 
     port = server.server_address[1]
-    bridge = idxbridge.status()
+    bridge = idxbridge.status(refresh=True)
     brain = llm.status()
     stats = store.stats()
     print("")

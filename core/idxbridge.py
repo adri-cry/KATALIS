@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,20 @@ class BridgeUnavailable(RuntimeError):
     """The idx binary is absent, failed, or answered something unusable."""
 
 
+# status() runs `idx version`, and desk.analyse asks for it on every request. The
+# answer only changes when the binary itself changes, so it is cached; the cache
+# key is the resolved path, which makes installing the binary take effect at once.
+_STATUS_TTL = 60.0
+_STATUS_LOCK = threading.Lock()
+_STATUS: dict = {"at": 0.0, "path": None, "value": None}
+
+
+def _reset_cache() -> None:
+    """Test hook: forget the cached version handshake."""
+    with _STATUS_LOCK:
+        _STATUS.update({"at": 0.0, "path": None, "value": None})
+
+
 def binary() -> str | None:
     configured = os.environ.get("IDX_BIN")
     if configured and Path(configured).exists():
@@ -49,17 +64,33 @@ def available() -> bool:
     return binary() is not None
 
 
-def status() -> dict:
+def status(refresh: bool = False) -> dict:
+    """Availability and version, at most one subprocess per minute.
+
+    `refresh=True` forces the handshake again — the startup banner uses it so the
+    operator sees the truth immediately instead of a cached answer.
+    """
     path = binary()
+    now = time.monotonic()
+    with _STATUS_LOCK:
+        cached = _STATUS["value"]
+        if (not refresh and cached is not None and _STATUS["path"] == path
+                and now - _STATUS["at"] < _STATUS_TTL):
+            return dict(cached)
     if path is None:
-        return {"available": False, "path": None, "version": None,
-                "hint": 'Build it with: cd vendor/idx && cargo build --release'}
-    try:
-        payload = run("version", timeout=15)
-        version = payload.get("version") or payload.get("data", {}).get("version") or "unknown"
-    except BridgeUnavailable:
-        version = "unknown"
-    return {"available": True, "path": path, "version": version, "hint": None}
+        payload = {"available": False, "path": None, "version": None,
+                   "hint": 'Build it with: cd vendor/idx && cargo build --release'}
+    else:
+        try:
+            answer = run("version", timeout=15)
+            version = answer.get("version") or answer.get("data", {}).get("version") or "unknown"
+        except BridgeUnavailable:
+            version = "unknown"
+        payload = {"available": True, "path": path, "version": version, "hint": None}
+    payload["checked_at"] = int(time.time())
+    with _STATUS_LOCK:
+        _STATUS.update({"at": now, "path": path, "value": dict(payload)})
+    return payload
 
 
 def run(*args: str, timeout: int = 20, attempts: int = 1) -> dict:

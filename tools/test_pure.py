@@ -153,6 +153,40 @@ finally:
     desk.idxbridge.subprocess.run = original_idx_run
     desk.idxbridge.binary = original_idx_binary
 
+# ---- IDX bridge status cache --------------------------------------------------
+# desk.analyse reports sources on every request, so status() must not run
+# `idx version` (a process spawn) on each one.
+original_status_run = desk.idxbridge.run
+version_calls = []
+
+
+def fake_version(*args, **kwargs):
+    version_calls.append(args)
+    return {"version": "9.9.9"}
+
+
+try:
+    desk.idxbridge._reset_cache()
+    desk.idxbridge.binary = lambda: "idx-test"
+    desk.idxbridge.run = fake_version
+    first = desk.idxbridge.status()
+    second = desk.idxbridge.status()
+    check("idx bridge: status di-cache, bukan proses tiap panggilan",
+          len(version_calls) == 1 and first["version"] == "9.9.9"
+          and second["version"] == "9.9.9" and "checked_at" in second,
+          str(version_calls))
+    fresh = desk.idxbridge.status(refresh=True)
+    check("idx bridge: refresh memaksa handshake ulang",
+          len(version_calls) == 2 and fresh["version"] == "9.9.9", str(version_calls))
+    desk.idxbridge.binary = lambda: "idx-other"
+    desk.idxbridge.status()
+    check("idx bridge: biner berbeda membatalkan cache",
+          len(version_calls) == 3, str(version_calls))
+finally:
+    desk.idxbridge._reset_cache()
+    desk.idxbridge.run = original_status_run
+    desk.idxbridge.binary = original_idx_binary
+
 # ---- parallel role reads -----------------------------------------------------
 # All four independent external-role stubs must overlap; results must retain the
 # established flow/bandar/fundamental/news order for downstream rendering.

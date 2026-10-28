@@ -442,7 +442,7 @@ proksi harga, dan kartunya berlabel `proksi`.
 Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
 
 ```bash
-python tools/test_pure.py        # 97 cek backend: indikator, dewan, jurnal, pemindai
+python tools/test_pure.py        # 100 cek backend: indikator, dewan, jurnal, pemindai
 node tools/test_pure.mjs         # 45 cek frontend: ringkasan, simulator, chart, escape
 ```
 
