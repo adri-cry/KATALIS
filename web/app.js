@@ -1170,10 +1170,23 @@ function wireDecisionWidgets(data) {
   });
 }
 
-function paintVerdict(data) {  const decision = data.decision || {};
-  const plan = data.trader || {};
+function renderPlan(plan) {
   const budget = plan.value ? `Rp${rp(plan.value)}` : "—";
   const lots = plan.lots == null ? "—" : `${rp(plan.lots)} lot`;
+  return `<div class="plan">
+      <div><div class="k">Entry</div><div class="v">${rp(plan.entry)}</div></div>
+      <div><div class="k">Stop</div><div class="v down">${rp(plan.stop)}</div></div>
+      <div><div class="k">Target</div><div class="v up">${rp(plan.target)}</div></div>
+      <div><div class="k">R : R</div><div class="v">${esc(plan.reward_risk ?? "—")}</div></div>
+      <div><div class="k">Ukuran</div><div class="v">${lots}</div></div>
+      <div><div class="k">Nilai</div><div class="v">${budget}</div></div>
+      ${plan.lots == null ? `<div style="grid-column:1/-1"><div class="k">Catatan</div>
+        <div style="font-size:12px;color:#c3d2df;margin-top:2px">${esc(plan.note || "")}</div></div>` : ""}
+    </div>`;
+}
+
+function paintVerdict(data) {  const decision = data.decision || {};
+  const plan = data.trader || {};
   const sources = [
     ["yahoo", "Yahoo Finance"],
     data.sources?.idx?.available ? ["idx", "idx CLI"] : ["proxy", "proksi harga"],
@@ -1189,16 +1202,7 @@ function paintVerdict(data) {  const decision = data.decision || {};
       <div class="row"><span>Skor keyakinan mesin · bukan peluang profit</span><span>${Math.round((decision.confidence || 0) * 100)}%</span></div>
       <div class="bar"><i class="fill" style="width:${clamp01(decision.confidence || 0) * 100}%"></i></div>
     </div>
-    <div class="plan">
-      <div><div class="k">Entry</div><div class="v">${rp(plan.entry)}</div></div>
-      <div><div class="k">Stop</div><div class="v down">${rp(plan.stop)}</div></div>
-      <div><div class="k">Target</div><div class="v up">${rp(plan.target)}</div></div>
-      <div><div class="k">R : R</div><div class="v">${plan.reward_risk ?? "—"}</div></div>
-      <div><div class="k">Ukuran</div><div class="v">${lots}</div></div>
-      <div><div class="k">Nilai</div><div class="v">${budget}</div></div>
-      ${plan.lots == null ? `<div style="grid-column:1/-1"><div class="k">Catatan</div>
-        <div style="font-size:12px;color:#c3d2df;margin-top:2px">${esc(plan.note || "")}</div></div>` : ""}
-    </div>
+    ${renderPlan(plan)}
     <div class="verdict-note">
       ${esc(decision.summary || "")}
       <div class="src">
@@ -1502,10 +1506,13 @@ function viewAdvice() {
 /* ---------- journal ---------- */
 
 function statCards(scores) {
-  return Object.entries(scores || {}).map(([rating, value]) => `
+  return Object.entries(scores || {}).map(([rating, value]) => {
+    const hit = Number.isFinite(value.hit_rate) ? `${Math.round(value.hit_rate * 100)}% tepat` : "tanpa arah";
+    return `
     <div class="stat"><div class="k">${esc(rating)}</div>
-      <div class="v">${value.count} <span class="muted" style="font-size:12px">· ${value.hit_rate == null ? "tanpa arah" : `${Math.round(value.hit_rate * 100)}% tepat`}</span></div>
-      <div class="muted" style="font-size:12px">rata-rata alpha ${pct(value.mean_alpha * 100)}</div></div>`).join("");
+      <div class="v">${num(value.count, 0)} <span class="muted" style="font-size:12px">· ${hit}</span></div>
+      <div class="muted" style="font-size:12px">rata-rata alpha ${pct((Number(value.mean_alpha) || 0) * 100)}</div></div>`;
+  }).join("");
 }
 
 async function loadJournal() {
@@ -1613,7 +1620,7 @@ function paintPortfolio(payload) {
       <input id="p-qty" placeholder="lot (100)" aria-label="jumlah lot">
       <input id="p-avg" placeholder="harga rata-rata" aria-label="harga rata-rata">
       <button class="primary" id="p-add">Tambah / ubah</button>
-      <input id="p-cash" placeholder="kas (Rp)" aria-label="kas" value="${payload.cash || ""}">
+      <input id="p-cash" placeholder="kas (Rp)" aria-label="kas" value="${esc(payload.cash ?? "")}">
       <button class="ghost" id="p-set-cash">Simpan kas</button>
     </div>
     <table>
@@ -1754,5 +1761,6 @@ if (typeof module !== "undefined") {
   module.exports = { renderCandles, viewRoles, viewDebate, viewRisk, viewAdvice, viewIdle,
                      aiStrip, paintVerdict, renderDecisionSummary, renderSimulator,
                       renderSimulationResult, showCross, hideCross, axisLabel, fullLabel,
-                     viewScreener, state, prefs, esc, rp, pct, analysisBelongsTo };
+                     viewScreener, state, prefs, esc, rp, pct, analysisBelongsTo,
+                     renderPlan, statCards };
 }

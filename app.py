@@ -35,6 +35,13 @@ _ANALYSIS_JOBS: dict[str, dict] = {}
 _LATEST_ANALYSES: dict[str, dict] = {}  # process-local; simulation accepts only these machine plans
 _ANALYSIS_JOB_TTL = 60 * 60
 
+# The dashboard builds its markup from template strings, so a strict script policy
+# is the second line of defence behind web/app.js's esc(). 'unsafe-inline' is
+# limited to styles: the view templates set style="…" for score bars and widths.
+_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'")
+
 
 def _analysis_job(job_id: str, *, updates: dict | None = None) -> dict | None:
     now = time.time()
@@ -234,6 +241,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if content_type.startswith("text/html"):
+            self.send_header("Content-Security-Policy", _CSP)
         self.end_headers()
         try:
             self.wfile.write(body)

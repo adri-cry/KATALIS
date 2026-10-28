@@ -169,6 +169,17 @@ check("job: legacy job without a symbol stays visible",
   && ui.analysisBelongsTo({ symbol: "BBCA.JK" }, "") === true);
 check("job: no job belongs to nothing", ui.analysisBelongsTo(null, "BBCA.JK") === false);
 
+// ---- values the server does not control are escaped, not trusted -------------
+const hostilePlan = ui.renderPlan({ entry: 1000, stop: 950, target: 1100, lots: 2,
+  reward_risk: "<img src=x onerror=alert(1)>" });
+check("plan: reward_risk tidak dirender sebagai markup",
+  hostilePlan.includes("&lt;img") && !hostilePlan.includes("<img"));
+const hostileStats = ui.statCards({
+  Hold: { count: "<script>alert(1)</script>", hit_rate: "0.5", mean_alpha: 0 },
+});
+check("jurnal: jumlah dan hit rate tepercaya tidak menjadi markup",
+  !hostileStats.includes("<script") && hostileStats.includes("tanpa arah"));
+
 // ---- report -----------------------------------------------------------------
 let failed = 0;
 for (const item of checks) {

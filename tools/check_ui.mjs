@@ -107,6 +107,10 @@ if (analysis.ai) {
 // wireEvents() touches are expected to be in the static HTML.
 const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
 const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+const shellResponse = await fetch(BASE + "/");
+check("shell: CSP dikirim",
+  (shellResponse.headers.get("content-security-policy") || "").includes("default-src 'self'"));
+check("shell: nosniff dikirim", shellResponse.headers.get("x-content-type-options") === "nosniff");
 ui.state.screener = { result: null, busy: false, symbols: "", maxPicks: 5, shortlist: 15, ai: false, record: false };
 const screenIdle = ui.viewScreener();
 check("pemindai: panel kosong dan AI mati secara default",
