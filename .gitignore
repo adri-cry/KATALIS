@@ -3,6 +3,7 @@ data/
 __pycache__/
 *.py[cod]
 tmp/
+tmp*/
 
 # --- secrets -----------------------------------------------------------------
 # Kunci API hidup di .env. Berkas ini tidak boleh pernah masuk riwayat git.
@@ -20,3 +21,7 @@ repos/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- tooling artifacts -------------------------------------------------------
+acl-recovery/
+.impeccable/
