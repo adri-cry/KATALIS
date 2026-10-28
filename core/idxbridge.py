@@ -62,13 +62,13 @@ def status() -> dict:
     return {"available": True, "path": path, "version": version, "hint": None}
 
 
-def run(*args: str, timeout: int = 60, attempts: int = 2) -> dict:
-    """Run one idx command, retrying once: idx.co.id refuses a share of requests.
+def run(*args: str, timeout: int = 20, attempts: int = 1) -> dict:
+    """Run one idx command with a bounded wait.
 
-    Its own documentation says ordinary connections pass while data-centre
-    traffic is often refused, and the refusal is intermittent — so one retry
-    after a short pause turns most of those into a slow answer instead of a
-    missing role.
+    IDX data is optional to the desk: if a public source is slow, the caller
+    degrades to its visible proxy instead of retrying a stalled network call
+    long enough to make a single-stock analysis feel hung. Callers may opt into
+    a longer timeout/retry for non-interactive tasks.
     """
     executable = binary()
     if executable is None:

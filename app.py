@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from core import advisor, desk, idxbridge, journal, llm, market, screener, store
+from core import advisor, desk, guidance, idxbridge, journal, llm, market, screener, simulation, store
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -32,6 +32,7 @@ WIB = timezone(timedelta(hours=7))
 
 _ANALYSIS_LOCK = threading.Lock()
 _ANALYSIS_JOBS: dict[str, dict] = {}
+_LATEST_ANALYSES: dict[str, dict] = {}  # process-local; simulation accepts only these machine plans
 _ANALYSIS_JOB_TTL = 60 * 60
 
 
@@ -119,12 +120,27 @@ def _execute_analysis(symbol: str, holding: int, range_: str, want_ai: bool,
     if want_ai:
         if progress:
             progress("ai", "Data analis siap; menunggu jawaban model AI…")
+        ai_started = time.time()
+
+        def ai_event(event: str) -> None:
+            # Streaming tells us what the model is doing; the label keeps the
+            # operator informed instead of a silent spinner for minutes.
+            labels = {"thinking": "Model AI sedang menimbang bukti…",
+                      "writing": "Model AI menyusun jawaban final…"}
+            text = labels.get(event)
+            if text and progress:
+                progress("ai", f"{text} ({time.time() - ai_started:.0f} dtk)")
+
         try:
-            ai_block = advisor.advise(analysis, portfolio)
+            ai_block = advisor.advise(analysis, portfolio, on_event=ai_event)
         except llm.LLMError as exc:
             ai_error = str(exc)
     analysis["ai"] = ai_block
     analysis["ai_error"] = ai_error
+    analysis["analysis_id"] = uuid.uuid4().hex
+    analysis["guidance"] = guidance.build(analysis)
+    with _ANALYSIS_LOCK:
+        _LATEST_ANALYSES[analysis["symbol"]] = analysis
 
     if progress:
         progress("save", "Menyimpan hasil analisis…")
@@ -138,11 +154,35 @@ def _execute_analysis(symbol: str, holding: int, range_: str, want_ai: bool,
          "summary": analysis["decision"]["summary"]},
         {"roles": analysis["roles"], "debate": analysis["debate"],
          "manager": analysis["manager"], "trader": analysis["trader"],
-         "risk": analysis["risk"], "decision": analysis["decision"]},
+         "risk": analysis["risk"], "decision": analysis["decision"],
+         "guidance": analysis["guidance"]},
         ai=ai_block,
     )
     analysis["recorded"] = decision_id
     return analysis
+
+
+def simulate_latest(symbol: str, analysis_id: str, lots, capital, fee_rate_pct=None) -> tuple[int, dict]:
+    """Calculate against the exact latest server-held machine plan for a symbol."""
+    symbol = market.normalise(symbol)
+    if not symbol:
+        return 400, {"error": "symbol is required"}
+    with _ANALYSIS_LOCK:
+        analysis = _LATEST_ANALYSES.get(symbol)
+    if not analysis:
+        return 404, {"error": "Jalankan analisis terbaru sebelum simulasi."}
+    if analysis_id != analysis.get("analysis_id"):
+        return 409, {"error": "Hasil analisis berubah. Muat ulang simulasi dari ringkasan terbaru."}
+    if (analysis.get("guidance") or {}).get("action") != "Beli":
+        return 409, {"error": "Simulator hanya tersedia saat ringkasan terbaru menyatakan Beli."}
+    plan = analysis.get("trader") or {}
+    try:
+        result = simulation.calculate(plan.get("entry"), plan.get("stop"), plan.get("target"),
+                                      lots, capital, fee_rate_pct)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    return 200, {"symbol": symbol, "as_of": analysis.get("as_of"),
+                 "plan_source": "mesin", "result": result}
 
 
 def _background_analysis(job_id: str, symbol: str, holding: int, range_: str,
@@ -272,6 +312,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({**payload, "indicators": market.indicators(payload["bars"])})
             if route == "/api/journal":
                 return self._json({"entries": store.journal(), "stats": store.stats()})
+            if route == "/api/decision/snapshot":
+                symbol = market.normalise(self._query().get("symbol") or "")
+                with _ANALYSIS_LOCK:
+                    analysis = _LATEST_ANALYSES.get(symbol)
+                if not analysis:
+                    return self._error("Jalankan analisis terbaru untuk simbol ini sebelum simulasi.", 404)
+                return self._json({
+                    "symbol": symbol,
+                    "price": analysis.get("price"),
+                    "as_of": analysis.get("as_of"),
+                    "trader": analysis.get("trader") or {},
+                    "guidance": analysis.get("guidance") or {},
+                })
             if route == "/api/decision":
                 identifier = self._query().get("id")
                 if not identifier:
@@ -365,6 +418,12 @@ class Handler(BaseHTTPRequestHandler):
                     record=bool(body.get("record")),
                     holding_days=int(body.get("holding_days") or 5),
                 ))
+
+            if route == "/api/simulate":
+                code, result = simulate_latest(body.get("symbol") or "", body.get("analysis_id") or "",
+                                               body.get("lots"), body.get("capital"),
+                                               body.get("fee_rate_pct"))
+                return self._json(result, code)
 
             if route == "/api/settle":
                 return self._json(journal.settle_all(body.get("holding_days")))

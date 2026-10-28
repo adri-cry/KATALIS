@@ -8,6 +8,16 @@ about them. Two rules shape the client:
 - **A failure is not a result.** A missing key, a refused call, or an answer
   that is not the JSON asked for raises ``LLMError``; the caller keeps its
   deterministic verdict instead of inventing one.
+
+And one lesson the latency audit of 2026-10-28 wrote here: a thinking model
+behind a gateway spends one to several minutes generating invisible reasoning
+tokens before the answer exists. Requested without streaming, the connection
+sits dead-silent the whole time, so any socket timeout kills a call that was
+about to succeed — and retrying it tripled the wait, which is where the
+"Analisa dengan AI makan 10-15 menit" experience came from. The client now
+asks for ``stream: true`` first: chunks start flowing in seconds, the socket
+timeout only ever measures a stalled stream, and the total wait becomes the
+model's real working time instead of a multiple of the timeout.
 """
 
 from __future__ import annotations
@@ -24,12 +34,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_BASE = "https://api.openai.com/v1"
-_TIMEOUT = 90
-_ATTEMPTS = 3
+# Streaming: the gap between two chunks. A healthy stream ticks every few
+# hundred milliseconds, so this only fires when the gateway truly stalls —
+# not while the model is thinking, because thinking arrives as chunks too.
+_TIMEOUT = 60
+_ATTEMPTS = 2
 
 
 class LLMError(RuntimeError):
     """The model was not configured, refused, or answered unusably."""
+
+
+class _StreamUnsupported(Exception):
+    """The gateway refused ``stream``; fall back to one blocking request."""
 
 
 ENV_FILE = ROOT / ".env"
@@ -157,7 +174,7 @@ def diagnose() -> dict:
                         f"api.openai.com. Isi OPENAI_BASE_URL dengan alamat gateway Anda.")
     if key and "api.openai.com" not in endpoint and not endpoint.endswith("/v1"):
         warnings.append(f"Endpoint '{endpoint}' tidak diakhiri '/v1'. Klien memanggil "
-                        "<endpoint>/chat/completions, jadi gateway yang memakai /v1 perlu ditulis.")
+                        f"<endpoint>/chat/completions, jadi gateway yang memakai /v1 perlu ditulis.")
     if key and "api.openai.com" in endpoint and len(key) < 40:
         warnings.append(f"Kunci hanya {len(key)} karakter; kunci OpenAI jauh lebih panjang. "
                         "Pastikan tidak terpotong saat menempel.")
@@ -190,19 +207,118 @@ def status() -> dict:
     }
 
 
-def _post(payload: dict, key: str) -> dict:
-    request = urllib.request.Request(
+def _request(payload: dict, key: str, accept: str) -> urllib.request.Request:
+    return urllib.request.Request(
         f"{base_url()}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
-            "User-Agent": "katalis/1.1",
+            "Accept": accept,
+            "User-Agent": "katalis/1.2",
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
+
+
+def _post_stream(payload: dict, key: str, on_event=None) -> tuple[str, dict, str | None]:
+    """One streaming chat completion; returns (content, usage, model).
+
+    SSE chunks carry the answer piecemeal in ``delta.content`` while the
+    model's invisible reasoning arrives as ``delta.reasoning_content`` and is
+    dropped — only the finished answer matters here. A gateway that answers
+    JSON despite ``stream`` is honoured as a plain completion; one that
+    refuses the parameter raises ``_StreamUnsupported`` so the caller can drop
+    it without spending a retry.
+    """
+    streamed = {**payload, "stream": True}
+    # Ask for usage in the final chunk; gateways that don't know the option
+    # say so in a 400 and we simply drop it and retry the stream.
+    if "stream_options" not in streamed:
+        streamed["stream_options"] = {"include_usage": True}
+    try:
+        response = urllib.request.urlopen(
+            _request(streamed, key, "text/event-stream"), timeout=_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        detail = _error_message(exc).lower()
+        if exc.code == 400 and "stream" in detail:
+            if "stream_options" in detail:
+                streamed.pop("stream_options", None)
+                return _post_stream(streamed, key, on_event)
+            raise _StreamUnsupported from None
+        raise
+    with response:
+        ctype = (response.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in ctype:
+            # Not SSE after all: the body is a normal completion object.
+            body = json.loads(response.read().decode("utf-8"))
+            return _content_of(body), body.get("usage") or {}, body.get("model")
+        parts: list[str] = []
+        usage: dict = {}
+        answer_model: str | None = None
+        wrote = False
+        last_emit = 0.0
+
+        def fire(name: str) -> None:
+            nonlocal last_emit
+            if on_event:
+                try:
+                    on_event(name)
+                    last_emit = time.monotonic()
+                except Exception:          # noqa: BLE001 — progress must never break the call
+                    pass
+
+        for raw in response:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue                    # a keepalive or split frame; skip
+            if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                usage = chunk["usage"]
+            if not answer_model and isinstance(chunk.get("model"), str):
+                answer_model = chunk["model"]
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    if not wrote:
+                        wrote = True
+                        fire("writing")
+                    parts.append(piece)
+                elif (delta.get("reasoning_content") or delta.get("reasoning")) and not wrote:
+                    # A long thinking phase must keep the caller's job record
+                    # fresh, so the "thinking" event repeats while it runs —
+                    # the app refreshes its timestamp and the UI its counter.
+                    if time.monotonic() - last_emit >= 30:
+                        fire("thinking")
+        return "".join(parts), usage, answer_model
+
+
+def _content_of(body: dict) -> str:
+    message = (body.get("choices") or [{}])[0].get("message") or {}
+    return message.get("content") or ""
+
+
+def _post_blocking(payload: dict, key: str) -> tuple[str, dict, str | None]:
+    """One plain (non-streaming) completion for gateways without SSE."""
+    with urllib.request.urlopen(_request(payload, key, "application/json"),
+                                timeout=_TIMEOUT) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    return _content_of(body), body.get("usage") or {}, body.get("model")
+
+
+def _complete(payload: dict, key: str, on_event=None) -> tuple[str, dict, str | None]:
+    """Stream first; a gateway that cannot stream gets one blocking request."""
+    try:
+        return _post_stream(payload, key, on_event)
+    except _StreamUnsupported:
+        return _post_blocking(payload, key)
 
 
 def _error_message(exc: urllib.error.HTTPError) -> str:
@@ -235,13 +351,17 @@ def _extract_json(text: str) -> dict:
 
 
 def chat_json(system: str, user: str, *, model_name: str | None = None,
-              temperature: float = 0.2) -> dict:
+              temperature: float = 0.2, on_event=None) -> dict:
     """One chat completion, parsed as a JSON object.
+
+    ``on_event`` (optional) is called once with ``"thinking"`` when the model
+    starts producing reasoning and with ``"writing"`` when the visible answer
+    begins — the dashboard uses it to keep the progress line honest.
 
     Retries a refusal that looks transient (429/5xx/timeout). A 4xx that names a
     problem with the request fails immediately — except a refusal of
-    ``response_format``, which is retried once without it: many gateways serve
-    models that have no native JSON mode.
+    ``response_format`` or ``stream``, which is retried once without it: many
+    gateways serve models that have neither native JSON mode nor SSE.
     """
     key = api_key()
     if not key:
@@ -262,7 +382,7 @@ def chat_json(system: str, user: str, *, model_name: str | None = None,
         if attempt:
             time.sleep(1.5 * attempt)
         try:
-            body = _post(payload, key)
+            content, usage, answer_model = _complete(payload, key, on_event)
         except urllib.error.HTTPError as exc:
             failure = _error_message(exc)
             lowered = failure.lower()
@@ -279,20 +399,20 @@ def chat_json(system: str, user: str, *, model_name: str | None = None,
             failure = f"jawaban bukan JSON: {exc}"
             continue
 
-        try:
-            content = body["choices"][0]["message"]["content"]
-            parsed = _extract_json(content)
-        except (KeyError, IndexError, TypeError) as exc:
-            failure = f"bentuk jawaban tidak dikenal: {exc}"
+        if not content:
+            failure = "jawaban streaming kosong"
             continue
+
+        try:
+            parsed = _extract_json(content)
         except json.JSONDecodeError as exc:
             failure = f"isi jawaban bukan JSON: {exc}"
             continue
         if not isinstance(parsed, dict):
             failure = "jawaban bukan objek JSON"
             continue
-        parsed["_model"] = body.get("model") or payload["model"]
-        parsed["_usage"] = body.get("usage") or {}
+        parsed["_model"] = answer_model or payload["model"]
+        parsed["_usage"] = usage or {}
         return parsed
 
     raise LLMError(failure)

@@ -101,12 +101,14 @@ Dua centangan di bawah kotak pencarian tersimpan di browser:
 |---|---|
 | **Watchlist** (kiri) | Harga, perubahan, dan kilasan 30 sesi untuk tiap saham. Klik = pilih saham (tanpa biaya). Harga yang bergerak berkedip dan diperbarui tiap 30 detik. |
 | **Grafik** (tengah) | Lilin + SMA20 + volume, sumbu waktu, garis penutupan sebelumnya, dan penanda harga terakhir yang berdenyut. **Arahkan kursor ke lilin** untuk membaca O/H/L/C, volume, perubahan, dan harga pada posisi kursor. Rentang: **1H / 5H** (intraday) sampai 2 tahun. Harga di judul bergerak mengikuti stream. |
-| **Kartu putusan** (kanan) | Rating lima tingkat, keyakinan, serta rencana: entry, stop, target, rasio R:R, jumlah lot, dan nilai rupiah. Rating AI ditampilkan berdampingan bila aktif. |
-| **Nasihat AI** | Tesis, daftar risiko, syarat yang membatalkan tesis, dan rencana versi model — beserta disclaimer. |
+| **Ringkasan keputusan** | Label Beli/Tunggu/Hindari dipetakan secara deterministik dari rating mesin; bila data kurang, timeframe tak selaras, atau arah sinyal berbeda, sistem memilih Tunggu/Data belum cukup. Bukan probabilitas atau nasihat investasi. |
+| **Kartu putusan** (kanan) | Rating lima tingkat, skor keyakinan heuristik (bukan peluang profit), serta level mesin: entry, stop, target, R:R, jumlah lot, dan nilai rupiah. Rating AI tampil terpisah. |
+| **Nasihat AI** | Tesis, alasan dan risiko model; Entry/Stop/Target tetap level mesin. AI tidak menetapkan atau mengubah level. |
+| **Simulasi** | Skenario P/L kotor/neto dari level mesin, jumlah lot dan modal yang Anda masukkan; biaya opsional hanya bila tarif broker Anda diketahui. Tidak memasukkan slippage/pajak yang tak diisi. |
 | **Dewan Analis** | Lima kartu peran: skor −2…+2, bukti yang mendukung dan yang menentang, plus label sumber (`data idx` atau `proksi`). |
 | **Debat** | Argumen terkuat di kedua sisi, diambil dari bukti peran. |
 | **Risiko** | Tiga sikap: agresif, netral, konservatif — masing-masing dengan angka yang mendasarinya. |
-| **Jurnal** | Setiap keputusan, harga masuk/keluar, return, return IHSG, dan **alpha**. Tombol untuk menilai yang sudah jatuh tempo. |
+| **Jurnal** | Setiap keputusan, alasan yang disimpan saat itu, rating mesin/AI, harga masuk/keluar, return, IHSG, dan **alpha**. Tombol untuk menilai yang sudah jatuh tempo; ini evaluasi maju, bukan backtest. |
 | **Portofolio** | Posisi, harga rata-rata, laba/rugi, kas, dan ekuitas. Ekuitas inilah yang dipakai menghitung ukuran posisi. |
 
 ### Realtime
@@ -346,8 +348,9 @@ Batas yang perlu diketahui:
 | `GET /api/health` | Versi, benchmark, status `idx`, ringkasan jurnal |
 | `GET /api/watchlist` / `POST` | Daftar + harga; `{"add": ["ANTM.JK"]}` atau `{"remove": "..."}` |
 | `GET /api/market?symbol=&range=` | Bar OHLCV + indikator |
-| `POST /api/analyze` | `{"symbol": "BBCA.JK", "holding_days": 5}` → seluruh hasil dewan |
-| `GET /api/journal` / `POST /api/settle` | Catatan keputusan; nilai yang jatuh tempo |
+| `POST /api/analyze` | `{"symbol": "BBCA.JK", "holding_days": 5}` → seluruh hasil dewan + ringkasan keputusan berbasis aturan |
+| `POST /api/simulate` | Simulasi P/L memakai level mesin pada analisis terkini; modal, lot, biaya opsional dari pengguna |
+| `GET /api/journal` / `POST /api/settle` | Catatan keputusan + alasan/level tersimpan; nilai yang jatuh tempo |
 | `GET/POST /api/portfolio`, `POST /api/cash` | Posisi, kas, ekuitas |
 | `GET /api/idx?cmd=&symbol=` | Data mentah dari biner `idx` |
 
@@ -396,12 +399,16 @@ katalis/
     store.py             SQLite: watchlist, keputusan, portofolio
     idxbridge.py         jembatan opsional ke biner idx
     llm.py               klien OpenAI (hanya pustaka standar)
-    advisor.py           prompt + validasi jawaban model
+    advisor.py           prompt + validasi jawaban model; level harga selalu dari mesin
+    guidance.py          pemetaan Beli/Tunggu/Hindari, konflik, freshness, dan risiko
+    simulation.py        skenario P/L dari level mesin + input pengguna
     screener.py          pemindai: gerbang kode -> dewan -> satu panggilan model
   web/
     index.html app.js styles.css    dashboard (tanpa framework, tanpa build)
   tools/
     check_ui.mjs         render dashboard terhadap data sungguhan
+    test_pure.py         backend/offline: keputusan, konflik, simulasi, jurnal, pemindai
+    test_pure.mjs        frontend/offline: ringkasan, simulator, chart, dan escape
     check_crosshair.js   geometri crosshair tanpa browser
     fetch_repos.mjs      unduh sumber kedua repo ke vendor/
     extract_repos.py     bongkar arsip itu ke susunan yang dipakai

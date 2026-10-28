@@ -185,8 +185,17 @@ def journal(limit: int = 100) -> list[dict]:
     for row in rows:
         entry = dict(row)
         entry["summary"] = json.loads(entry.pop("summary_json") or "{}")
-        entry.pop("sections_json", None)
-        entry.pop("ai_json", None)          # only the detail endpoint carries the full text
+        sections = json.loads(entry.pop("sections_json") or "{}")
+        # The journal needs the original reason and levels, not a fresh market read.
+        entry["guidance"] = sections.get("guidance")
+        entry["trader"] = sections.get("trader")
+        entry["decision_summary"] = (sections.get("decision") or {}).get("summary")
+        ai_detail = json.loads(entry.pop("ai_json") or "null")
+        entry["ai_summary"] = ({"thesis": ai_detail.get("thesis"),
+                                "risks": ai_detail.get("risks") or [],
+                                "rating": ai_detail.get("rating"),
+                                "what_would_change": ai_detail.get("what_would_change") or []}
+                               if isinstance(ai_detail, dict) else None)
         out.append(entry)
     return out
 

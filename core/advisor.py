@@ -33,8 +33,9 @@ ATURAN MUTLAK:
 2. Bila sebuah peran ditandai tidak tersedia, sebutkan sebagai ketiadaan data —
    jangan menganggapnya netral.
 3. Jangan memberi jaminan hasil. Sebutkan apa yang bisa membatalkan tesis.
-4. Rating wajib salah satu: Buy, Overweight, Hold, Underweight, Sell.
-5. Tulis dalam bahasa Indonesia yang padat dan konkret. Sebut angka saat berargumen:
+4. Jangan membuat atau mengubah Entry, Stop, atau Target. Level harga hanya berasal dari mesin deterministik dan tidak diminta dalam jawaban ini.
+5. Rating wajib salah satu: Buy, Overweight, Hold, Underweight, Sell.
+6. Tulis dalam bahasa Indonesia yang padat dan konkret. Sebut angka saat berargumen:
    "asing net jual 1,06 miliar saham", bukan "aliran asing negatif".
 
 Jawab HANYA dengan satu objek JSON:
@@ -43,7 +44,7 @@ Jawab HANYA dengan satu objek JSON:
   "conviction": 0.0-1.0,
   "thesis": "2-4 paragraf: apa yang mendukung, apa yang melawan, mengapa rating ini",
   "risks": ["risiko konkret yang terbaca dari data"],
-  "action": {"entry": angka|null, "stop": angka|null, "target": angka|null, "sizing_note": "..."},
+  "action": {"sizing_note": "catatan singkat tentang ukuran risiko; jangan membuat angka level harga"},
   "what_would_change": ["syarat yang membatalkan tesis"],
   "confidence_note": "satu kalimat: seberapa lengkap datanya"
 }"""
@@ -109,11 +110,14 @@ def _texts(value, limit: int = 5) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()][:limit]
 
 
-def advise(analysis: dict, portfolio: dict | None = None) -> dict:
+def advise(analysis: dict, portfolio: dict | None = None,
+           on_event=None) -> dict:
     """Ask the model for a recommendation over the desk's evidence.
 
     Returns the normalised suggestion, or raises ``llm.LLMError`` when the key,
-    the network, or the answer is unusable.
+    the network, or the answer is unusable. ``on_event`` is forwarded to the
+    client so the caller can watch thinking/writing transitions while the
+    model works.
     """
     if not llm.status()["configured"]:
         raise llm.LLMError("OPENAI_API_KEY belum diisi")
@@ -125,7 +129,7 @@ def advise(analysis: dict, portfolio: dict | None = None) -> dict:
             + json.dumps(evidence, ensure_ascii=False, indent=2)
             + "\n\nBerikan rekomendasi untuk instrumen ini beserta alasannya.")
 
-    raw = llm.chat_json(_SYSTEM, user)
+    raw = llm.chat_json(_SYSTEM, user, on_event=on_event)
     mechanical = (analysis.get("decision") or {}).get("rating")
     rating = _clean(raw.get("rating"), fallback=mechanical)
     if rating is None:
@@ -138,10 +142,8 @@ def advise(analysis: dict, portfolio: dict | None = None) -> dict:
         conviction = 0.5
 
     action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
-    levels = {}
-    for key in ("entry", "stop", "target"):
-        value = action.get(key)
-        levels[key] = round(float(value), 2) if isinstance(value, (int, float)) else None
+    mechanical_plan = analysis.get("trader") or {}
+    levels = {key: mechanical_plan.get(key) for key in ("entry", "stop", "target")}
 
     return {
         "rating": rating,
@@ -150,7 +152,9 @@ def advise(analysis: dict, portfolio: dict | None = None) -> dict:
         "mechanical_rating": mechanical,
         "thesis": str(raw.get("thesis") or "").strip()[:4000],
         "risks": _texts(raw.get("risks")),
-        "action": {**levels, "sizing_note": str(action.get("sizing_note") or "").strip()[:400]},
+        "action": {**levels,
+                   "sizing_note": "Entry, stop, dan target berasal dari mesin deterministik, bukan dari model.",
+                   "level_source": "mesin"},
         "what_would_change": _texts(raw.get("what_would_change")),
         "confidence_note": str(raw.get("confidence_note") or "").strip()[:400],
         "model": raw.get("_model") or llm.model(),

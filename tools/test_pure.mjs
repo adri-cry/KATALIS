@@ -114,6 +114,50 @@ check("pemindai: teks tidak tepercaya di-escape", !screenHtml.includes("<script>
   && !screenHtml.includes("<img src=x>") && screenHtml.includes("&lt;script&gt;"));
 ui.state.screener.result = null;
 
+// ---- decision summary + simulator -------------------------------------------
+const guideFixture = {
+  policy: "Pemetaan deterministik; bukan probabilitas.", action: "Tunggu", status: "sinyal_berbeda",
+  why: "Teknikal bearish berbeda dari AI Buy.", next_action: "Tunggu sinyal baru.",
+  machine_rating: "Hold", machine_action: "Tunggu", machine_confidence: 0.74,
+  machine_confidence_note: "Keyakinan adalah skor heuristik, bukan probabilitas keuntungan.",
+  ai_rating: "Buy", ai_action: "Beli", ai_conviction: 0.8,
+  ai_confidence_note: "Keyakinan model bukan probabilitas profit.",
+  as_of: "2026-10-27", stale_snapshot: false, staleness_days: 0,
+  technical: { label: "negatif", strength: "kuat", trend: "turun", score: -1.2,
+    available: true, supporting: [], opposing: ["harga di bawah SMA20"] },
+  conflicts: [{ explanation: "Teknikal berbeda dari AI." }],
+  data_quality: { status: "cukup", available_roles: 5, total_roles: 5, sessions: 100,
+    as_of: "2026-10-27", staleness_days: 0, stale_snapshot: false,
+    missing_roles: ["Berita"], proxy_roles: ["Teknikal"], warnings: [] },
+  risk: { flags: ["ATR tinggi"], high_risk: true, reward_risk: 1.5,
+    supporting: ["volume naik"], opposing: ["harga lemah"], ai_risks: ["volatilitas"],
+    explanation: "R:R bukan peluang berhasil." },
+};
+const summaryHtml = ui.renderDecisionSummary({ guidance: guideFixture });
+check("ringkasan: konflik tampil sebagai Tunggu dan alasan dua arah", summaryHtml.includes("Tunggu")
+  && summaryHtml.includes("Teknikal bearish berbeda") && summaryHtml.includes("Buy · Beli"));
+check("ringkasan: confidence bukan probabilitas profit", summaryHtml.includes("bukan probabilitas")
+  && summaryHtml.includes("Data cukup"));
+check("ringkasan: tanggal snapshot dan freshness tampil", summaryHtml.includes("Tanggal snapshot:")
+  && summaryHtml.includes("2026-10-27"));
+check("ringkasan: missing/proxy quality are disclosed", summaryHtml.includes("Tanpa data")
+  && summaryHtml.includes("proksi harga/volume"));
+const simHtml = ui.renderSimulator({ analysis_id: "server-id", symbol: "BBCA.JK",
+  guidance: { action: "Beli" }, trader: { entry: 1000, stop: 950, target: 1100, lots: 2 } });
+check("simulator: buy-side uses locked machine levels, user enters amount/size", simHtml.includes("Entry mesin")
+  && simHtml.includes('id="sim-capital"') && simHtml.includes('id="sim-lots"')
+  && !simHtml.includes('id="sim-entry"'));
+const noBuySim = ui.renderSimulator({ analysis_id: "server-id", guidance: { action: "Tunggu", next_action: "Tunggu data." },
+  trader: { entry: 1000, stop: 950, target: 1100 } });
+check("simulator: Tunggu tidak membuka skenario transaksi beli", noBuySim.includes("Tunggu data")
+  && !noBuySim.includes('id="sim-form"'));
+const simResultHtml = ui.renderSimulationResult({ result: { entry_notional: 200000,
+  capital_share_pct: 40, target_pnl_on_capital_pct: 4, stop_pnl_on_capital_pct: -2,
+  gross_target_pnl: 20000, gross_stop_pnl: -10000,
+  fees_included: false, gross_reward_risk: 2, direction: "long" } });
+check("simulator: labels gross P/L and non-probability risk", simResultHtml.includes("kotor, biaya belum dihitung")
+  && simResultHtml.includes("bukan probabilitas berhasil"));
+
 // ---- report -----------------------------------------------------------------
 let failed = 0;
 for (const item of checks) {

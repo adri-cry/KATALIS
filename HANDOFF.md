@@ -34,6 +34,20 @@ Titik masuk: `python -m core.screener`, atau `POST /api/screen` di `app.py`.
 Daftar saham: `data/universe.txt` (contoh: `universe.example.txt`), jika kosong memakai
 watchlist. Dokumentasi pengguna ada di bagian "Pemindai" di `README.md`.
 
+## Klien AI: streaming, bukan menunggu dalam diam
+
+Audit latensi 28-10-2026 (lihat jurnal keputusan: jawaban AI tercatat 10-34 menit
+setelah klik) menemukan bahwa `glm-5.3-flash` lewat gateway memikirkan 1,6-3,2 ribu
+token *reasoning* — 60-105 detik keheningan total — sebelum jawaban ada. Klien
+non-streaming lama memotong panggilan itu di timeout lalu mengulanginya, sehingga
+satu klik terasa 10-15 menit dan sering berakhir `ai_error`. `core/llm.py` sekarang
+meminta `stream: true` lebih dulu: chunk mulai mengalir dalam detik, timeout hanya
+mengukur stream yang benar-benar macet, event `thinking`/`writing` diteruskan ke
+`advisor.advise(on_event=…)` untuk memperbarui baris progres, dan `thinking`
+berulang tiap 30 detik agar job tidak dianggap kedaluwarsa. Gateway tanpa SSE
+kembali ke satu permintaan biasa. Verifikasi: panggilan advisor asli yang sebelumnya
+selalu gagal kini selesai 105,6 dtk dengan jawaban utuh.
+
 ## Aturan yang jangan dilonggarkan
 
 Semua ini dijaga oleh **kode**, bukan hanya prompt, dan ada tesnya:

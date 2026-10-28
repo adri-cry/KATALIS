@@ -409,9 +409,11 @@ def _analyse_roles(ticker: str, snap: dict) -> list[dict]:
         lambda: _role_fundamental(ticker),
         lambda: _role_news(ticker),
     )
-    # IDX may refuse bursts, so two workers reduce serial waiting without
-    # launching all remote CLI calls at once. pool.map preserves evidence order.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="katalis-role") as pool:
+    # Each role reads an independent source (IDX, IPOT, fundamentals and RSS).
+    # Start all four together: with a two-worker pool the second pair could not
+    # begin until the first pair's slowest remote source returned. map preserves
+    # evidence order while bounding concurrency to the number of roles.
+    with ThreadPoolExecutor(max_workers=len(tasks), thread_name_prefix="katalis-role") as pool:
         return [market_role, *pool.map(lambda task: task(), tasks)]
 
 
@@ -532,6 +534,7 @@ def analyse(ticker: str, range_: str = "6mo", holding_days: int = 5,
 
     return {
         "symbol": snap["symbol"],
+        "range": range_,
         "name": snap["name"],
         "currency": snap["currency"],
         "as_of": as_of,

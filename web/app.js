@@ -87,6 +87,8 @@ function toast(message, isError = false) {
   if (!node) {
     node = document.createElement("div");
     node.className = "toast";
+    node.setAttribute("role", "status");
+    node.setAttribute("aria-live", "polite");
     document.body.appendChild(node);
   }
   node.textContent = message;
@@ -118,6 +120,8 @@ async function boot() {
     state.health = await api("/api/health");
     paintHealth();
   } catch (error) {
+    const mode = $("#chip-mode");
+    if (mode) { mode.textContent = "server tidak merespons"; mode.className = "chip"; mode.title = error.message; }
     toast(`Server tidak menjawab: ${error.message}`, true);
   }
 
@@ -221,10 +225,24 @@ function diagnosticsBlock() {
 
 /* ---------- watchlist ---------- */
 
-function bindWatchRows() {
-  $$(".wrow", $("#watchlist")).forEach((row) => row.addEventListener("click", () => {
-    openSymbol(row.dataset.symbol);
-  }));
+function wireWatchlist() {
+  $("#watchlist").addEventListener("click", (event) => {
+    const row = event.target.closest(".wrow");
+    if (!row) return;
+    const remove = event.target.closest("[data-remove]");
+    if (remove) return void removeWatch(remove.dataset.remove);
+    if (event.target.closest(".rowmain")) openSymbol(row.dataset.symbol);
+  });
+}
+
+async function removeWatch(symbol) {
+  try {
+    await api("/api/watchlist", { method: "POST", body: JSON.stringify({ remove: symbol }) });
+    toast(`${symbol.replace(".JK", "")} dihapus dari watchlist.`);
+    await loadWatchlist();
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function loadWatchlist() {
@@ -234,8 +252,13 @@ async function loadWatchlist() {
     const previous = state.watch?.quotes || [];
     const payload = await api("/api/watchlist");
     state.watch = payload;
+    const focusSym = document.activeElement?.closest?.(".wrow")?.dataset.symbol ?? null;
+    const focusDel = document.activeElement?.classList?.contains("del") ?? false;
     body.innerHTML = payload.quotes.map(watchRow).join("") || '<p class="muted pad">Watchlist kosong.</p>';
-    bindWatchRows();
+    if (focusSym) {
+      const row = body.querySelector(`.wrow[data-symbol="${CSS.escape(focusSym)}"]`);
+      (focusDel ? row?.querySelector(".del") : row?.querySelector(".rowmain"))?.focus();
+    }
     paintQuick(payload.symbols);
     flashChanged(previous, payload.quotes);
   } catch (error) {
@@ -265,18 +288,27 @@ function sparkline(values) {
           fill="none" stroke="${colour}" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
+const xIcon = `<svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true">
+  <path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>`;
+
 function watchRow(quote) {
+  const del = `<button class="del" data-remove="${esc(quote.symbol)}"
+    aria-label="Hapus ${esc(quote.symbol.replace(".JK", ""))} dari watchlist" title="Hapus">${xIcon}</button>`;
   if (quote.error) {
     return `<div class="wrow" data-symbol="${esc(quote.symbol)}">
-      <div><div class="sym">${esc(quote.symbol)}</div><div class="nm">tidak tersedia</div></div>
-      <div class="chg flat">—</div></div>`;
+      <button class="rowmain" data-symbol="${esc(quote.symbol)}" aria-label="Lihat ${esc(quote.symbol)}">
+        <div><div class="sym">${esc(quote.symbol)}</div><div class="nm">tidak tersedia</div></div>
+        <div class="chg flat">—</div>
+      </button>${del}</div>`;
   }
   const on = quote.symbol === state.symbol ? " on" : "";
   return `<div class="wrow${on}" data-symbol="${esc(quote.symbol)}">
-    <div><div class="sym">${esc(quote.symbol.replace(".JK", ""))}</div>
-         <div class="nm">${esc(quote.name || "")}</div></div>
-    <div><div class="px">${rp(quote.price)}</div>
-         <div class="chg ${tone(quote.change_pct)}">${pct(quote.change_pct)}</div></div>
+    <button class="rowmain" data-symbol="${esc(quote.symbol)}" aria-label="Lihat ${esc(quote.symbol.replace(".JK", ""))}">
+      <div><div class="sym">${esc(quote.symbol.replace(".JK", ""))}</div>
+           <div class="nm">${esc(quote.name || "")}</div></div>
+      <div><div class="px">${rp(quote.price)}</div>
+           <div class="chg ${tone(quote.change_pct)}">${pct(quote.change_pct)}</div></div>
+    </button>${del}
     ${sparkline(quote.spark)}
   </div>`;
 }
@@ -364,9 +396,18 @@ function paintLiveHead() {
   }
 }
 
+/* The desk's plan belongs to the analysed symbol only; a chart of another
+   symbol must not inherit its lines. */
+function currentPlan() {
+  const analysis = state.analysis;
+  if (!analysis || analysis.symbol !== state.symbol) return null;
+  return analysis.trader || null;
+}
+
 function paintChartSvg() {
   $("#chart").innerHTML = renderCandles(state.bars, {
     prevClose: state.live?.prev_close ?? state.chart?.prev_close,
+    plan: currentPlan(),
     interval: state.chart?.interval,
     timezone: state.chart?.timezone,
   });
@@ -380,18 +421,24 @@ function paintChartSvg() {
 
 function paintMetrics(indicators) {
   const ind = indicators || {};
-  const tiles = [
+  const tile = ([key, value, cls]) =>
+    `<div class="metric"><div class="k">${key}</div><div class="v ${cls}">${value}</div></div>`;
+  const main = [
     ["Terakhir", rp(ind.last), tone(ind.change_pct)],
     ["Perubahan", pct(ind.change_pct), tone(ind.change_pct)],
     ["RSI 14", num(ind.rsi14, 1), ""],
-    ["MACD hist", num(ind.macd_hist, 1), tone(ind.macd_hist)],
     ["ATR", `${num(ind.atr_pct, 2)}%`, ""],
+  ];
+  const more = [
+    ["MACD hist", num(ind.macd_hist, 1), tone(ind.macd_hist)],
     ["Vol 20h", rp(ind.vol_avg20), ""],
     ["Posisi 52m", ind.pos_52w == null ? "—" : `${Math.round(ind.pos_52w * 100)}%`, ""],
     ["Drawdown", `${num(ind.max_drawdown_pct, 1)}%`, "down"],
   ];
-  $("#metrics").innerHTML = tiles.map(([key, value, cls]) =>
-    `<div class="metric"><div class="k">${key}</div><div class="v ${cls}">${value}</div></div>`).join("");
+  $("#metrics").innerHTML =
+    main.map(tile).join("") +
+    `<details class="metric-more"><summary>4 indikator lain</summary>
+      <div class="metrics-sub">${more.map(tile).join("")}</div></details>`;
 }
 
 function paintStamp() {
@@ -518,7 +565,7 @@ function renderCandles(bars, options = {}) {
   for (let i = 0; i <= 4; i += 1) {
     const value = low + span * (i / 4), y = yPrice(value).toFixed(1);
     parts.push(`<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#1a2836" stroke-width="1"/>`);
-    parts.push(`<text x="${left + plotW + 6}" y="${Number(y) + 3.5}" fill="#8fa3b3" font-size="10"
+    parts.push(`<text x="${left + plotW + 6}" y="${Number(y) + 3.5}" fill="var(--muted)" font-size="10"
                 font-family="ui-monospace, monospace">${rp(value)}</text>`);
   }
 
@@ -528,8 +575,28 @@ function renderCandles(bars, options = {}) {
     const y = yPrice(previous).toFixed(1);
     parts.push(`<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#64748b"
                 stroke-width="1" stroke-dasharray="2 4"/>`);
-    parts.push(`<text x="${left + 4}" y="${Number(y) - 4}" fill="#64748b" font-size="9.5"
+    parts.push(`<text x="${left + 4}" y="${Number(y) - 4}" fill="var(--muted)" font-size="9.5"
                 font-family="ui-monospace, monospace">penutupan sebelumnya ${rp(previous)}</text>`);
+  }
+
+  // The desk's committed levels drawn where they are decided — on the price.
+  // ponytail: a level outside the visible span clamps to the edge, and a tag
+  // can collide with the last-price tag when levels sit close together;
+  // offset stacked tags if that ever bothers anyone.
+  const plan = options.plan;
+  const planLine = (value, colour, dashed) => {
+    if (value == null || !Number.isFinite(Number(value))) return;
+    const y = Math.max(top, Math.min(top + priceH, yPrice(Number(value))));
+    parts.push(`<line x1="${left}" y1="${y.toFixed(1)}" x2="${left + plotW}" y2="${y.toFixed(1)}"
+                stroke="${colour}" stroke-width="1" ${dashed ? 'stroke-dasharray="5 4" ' : ""}stroke-opacity="0.85"/>`);
+    parts.push(`<rect x="${left + plotW + 2}" y="${(y - 8).toFixed(1)}" width="58" height="16" rx="3" fill="${colour}"/>`);
+    parts.push(`<text x="${left + plotW + 31}" y="${(y + 3.5).toFixed(1)}" text-anchor="middle" fill="#0a0e13"
+                font-size="10" font-weight="700" font-family="ui-monospace, monospace">${rp(Number(value))}</text>`);
+  };
+  if (plan) {
+    planLine(plan.entry, "#f0b429", false);
+    planLine(plan.stop, "#ef4444", true);
+    planLine(plan.target, "#22c55e", true);
   }
 
   bars.forEach((bar, index) => {
@@ -579,7 +646,7 @@ function renderCandles(bars, options = {}) {
     const index = Math.min(bars.length - 1, Math.round(fraction * (bars.length - 1)));
     const x = left + index * step + step / 2;
     const anchor = position === 0 ? "start" : position === marks.length - 1 ? "end" : "middle";
-    parts.push(`<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" fill="#6f8494"
+    parts.push(`<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" fill="var(--muted)"
                 font-size="9.5" font-family="ui-monospace, monospace">${esc(
                   axisLabel(bars[index].t, options.interval, options.timezone))}</text>`);
   });
@@ -686,6 +753,20 @@ function showCross(svg, index, localY) {
   showTip(svg, at, centre, yOf(bar.c));
 }
 
+function tipPlanRows(price) {
+  const plan = currentPlan();
+  if (!plan) return "";
+  const row = (label, level) => {
+    if (level == null || !Number.isFinite(Number(level))) return "";
+    const delta = price - Number(level);
+    const sign = delta >= 0 ? "+" : "";
+    return `<div><span class="muted">${label}</span> ${rp(Number(level))}
+      <span class="${tone(delta)}">${sign}${num(delta, 0)} (${sign}${num(delta / Number(level) * 100, 1)}%)</span></div>`;
+  };
+  const body = [row("entry", plan.entry), row("stop", plan.stop), row("target", plan.target)].filter(Boolean).join("");
+  return body ? `<div class="xk-plan">${body}</div>` : "";
+}
+
 function showTip(svg, index, localX, localY) {
   const host = $("#chart");
   if (!host) return;
@@ -712,7 +793,8 @@ function showTip(svg, index, localX, localY) {
     <div class="xk-meta">
       <span class="${style}">${pct(change)}</span>
       <span class="muted">vol ${rp(bar.v)}</span>
-    </div>`;
+    </div>
+    ${tipPlanRows(bar.c)}`;
   tip.style.display = "block";
 
   const matrix = svg.getScreenCTM();
@@ -781,7 +863,7 @@ function analysisProgressView(job) {
     <div class="analysis-progress-body">
       <strong>${esc(job.message || labels[job.stage] || "Analisis sedang berjalan…")}</strong>
       <p class="muted">${esc(job.symbol || state.symbol)} · berjalan ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}</p>
-      ${job.stage === "ai" ? '<p class="muted">Bagian ini bergantung pada kecepatan layanan model. Jika halaman ter-refresh, status akan dilanjutkan selama server tetap berjalan.</p>' : ""}
+      ${job.stage === "ai" ? '<p class="muted">Model mengerjakan jawaban secara streaming — label di atas berubah saat mulai menimbang bukti dan mulai menulis. Berhenti berarti menunggu layanan model.</p>' : ""}
       <div class="analysis-progress-track"><i></i></div>
     </div>
   </div>`;
@@ -834,7 +916,7 @@ async function pollAnalysisJob(job) {
       const message = status.error || status.message || "Analisis gagal";
       finishAnalysisJob();
       toast(`Analisis gagal: ${message}`, true);
-      $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p></div>`;
+      $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
       return;
     }
     paintAnalysisProgress(job);
@@ -842,13 +924,13 @@ async function pollAnalysisJob(job) {
     if (error.message.includes("tidak ditemukan") || error.message.includes("404")) {
       finishAnalysisJob();
       const message = "Pekerjaan analisis tidak ditemukan. Server mungkin sempat dimulai ulang; silakan tekan Analisis untuk menjalankan kembali.";
-      if ($("#verdict")) $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p></div>`;
+      if ($("#verdict")) $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
       return;
     }
     if (error.message.includes("500")) {
       finishAnalysisJob();
       toast(`Analisis gagal: ${error.message}`, true);
-      $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
+      $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
       return;
     }
     // A transient poll/network failure must not discard the in-flight job.
@@ -904,7 +986,7 @@ async function runAnalysis() {
   } catch (error) {
     finishAnalysisJob();
     toast(`Analisis gagal dimulai: ${error.message}`, true);
-    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p></div>`;
+    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
   }
 }
 
@@ -920,6 +1002,131 @@ function viewIdle() {
 
 function paintIdleVerdict() {
   $("#verdict").innerHTML = viewIdle();
+}
+
+function decisionBucket(action) {
+  return action === "Beli" ? "buy" : action === "Hindari" ? "avoid" : action === "Tunggu" ? "wait" : "data";
+}
+
+function renderDecisionSummary(data) {
+  const guide = data.guidance;
+  if (!guide) return `<section class="decision-summary decision-data"><div><h3>Ringkasan keputusan belum tersedia</h3><p class="muted">Mulai ulang server KATALIS agar API memuat kebijakan ringkasan terbaru.</p></div></section>`;
+  const quality = guide.data_quality || {};
+  const technical = guide.technical;
+  const risk = guide.risk || {};
+  const list = (items, empty) => items?.length
+    ? `<ul>${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+    : `<p class="muted">${esc(empty)}</p>`;
+  const missing = quality.missing_roles || [];
+  const proxies = quality.proxy_roles || [];
+  const flags = risk.flags || [];
+  return `<section class="decision-summary decision-${decisionBucket(guide.action)}" aria-labelledby="decision-title">
+    <div class="decision-head">
+      <div><p class="decision-label">Ringkasan keputusan</p><h3 id="decision-title">${esc(guide.action || "Data belum cukup")}</h3></div>
+      <span class="decision-quality">Data ${esc(quality.status || "terbatas")} · ${rp(quality.available_roles || 0)}/${rp(quality.total_roles || 0)} peran · ${rp(quality.sessions || 0)} sesi</span>
+    </div>
+    <p class="decision-why">${esc(guide.why || "Alasan belum tersedia.")}</p>
+    <div class="decision-columns">
+      <div><h4>Yang mendukung</h4>${list(risk.supporting, "Belum ada bukti pendukung yang tersedia.")}</div>
+      <div><h4>Risiko yang perlu dipahami</h4>${list([...(risk.opposing || []), ...(risk.ai_risks || [])].slice(0, 4), "Tidak ada butir risiko tambahan yang tersedia; ini bukan berarti bebas risiko.")}</div>
+    </div>
+    <div class="decision-comparison" aria-label="Perbandingan analisis">
+      <div><span>Teknikal</span><strong>${technical?.available ? `${esc(technical.label)} · tren ${esc(technical.trend)} · sinyal ${esc(technical.strength)}` : "Data tidak tersedia"}</strong><small>Skor satu peran, bukan keputusan gabungan.</small></div>
+      <div><span>Gabungan mesin</span><strong>${esc(guide.machine_rating || "—")} · ${esc(guide.machine_action || "—")}</strong><small>Rating dari semua peran yang memiliki data.</small></div>
+      <div><span>AI</span><strong>${guide.ai_rating ? `${esc(guide.ai_rating)} · ${esc(guide.ai_action || "—")}` : (guide.ai_error ? "Tidak tersedia" : "Belum dijalankan")}</strong><small>Model membaca ringkasan bukti; bukan sumber level harga.</small></div>
+    </div>
+    <p class="decision-next"><strong>Langkah berikutnya:</strong> ${esc(guide.next_action || "Tinjau data dan risiko sebelum mengambil keputusan.")}</p>
+    <details class="decision-detail">
+      <summary>Kualitas data, keyakinan, dan arti angka</summary>
+      <p>${esc(guide.policy || "")}</p>
+      <p>${esc(guide.machine_confidence_note || "")}${guide.machine_confidence != null ? ` Skor heuristik mesin: ${Math.round(guide.machine_confidence * 100)}%.` : ""}</p>
+      ${guide.ai_rating ? `<p>${esc(guide.ai_confidence_note || "")}${guide.ai_conviction != null ? ` Keyakinan model: ${Math.round(guide.ai_conviction * 100)}%.` : ""}</p>` : ""}
+      ${quality.as_of ? `<p><strong>Tanggal snapshot:</strong> ${esc(quality.as_of)}${quality.staleness_days != null ? ` · ${rp(quality.staleness_days)} hari lalu` : ""}.</p>` : `<p><strong>Tanggal snapshot tidak diketahui.</strong> Ringkasan belum memberi label Beli.</p>`}
+       ${missing.length ? `<p><strong>Tanpa data:</strong> ${missing.map(esc).join(", ")}. Ini tidak dihitung netral.</p>` : ""}
+      ${proxies.length ? `<p><strong>Memakai proksi harga/volume:</strong> ${proxies.map(esc).join(", ")}.</p>` : ""}
+      ${quality.warnings?.length ? `<ul>${quality.warnings.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : ""}
+      ${flags.length ? `<p><strong>Batas risiko:</strong> ${flags.map(esc).join("; ")}.</p>` : ""}
+      <p>${esc(risk.explanation || "R:R membandingkan jarak target dan stop; bukan peluang keuntungan.")}</p>
+      ${technical ? `<div class="decision-columns"><div><h4>Bukti teknikal mendukung</h4>${list(technical.supporting, "Tidak ada butir pendukung teknikal.")}</div><div><h4>Bukti teknikal menentang</h4>${list(technical.opposing, "Tidak ada butir penentang teknikal.")}</div></div>` : ""}
+    </details>
+    <p class="decision-disclaimer">Ringkasan berbasis aturan yang dijelaskan; bukan probabilitas profit, jaminan hasil, atau nasihat investasi.</p>
+  </section>`;
+}
+
+function renderSimulator(data) {
+  const plan = data.trader || {};
+  if (data.guidance?.action !== "Beli") {
+    return `<details class="simulator"><summary>Simulasi potensi untung/rugi</summary><p class="muted">Simulator ditampilkan saat ringkasan menyatakan Beli. Saat ini: ${esc(data.guidance?.action || "Data belum cukup")}. ${esc(data.guidance?.next_action || "Tinjau data lebih dulu.")}</p></details>`;
+  }
+  if (!data.analysis_id || [plan.entry, plan.stop, plan.target].some((value) => value == null)) {
+    return `<details class="simulator"><summary>Simulasi potensi untung/rugi</summary><p class="muted">Level mesin atau id analisis belum tersedia. Jalankan analisis terbaru.</p></details>`;
+  }
+  if (Number(plan.target) <= Number(plan.entry)) {
+    return `<details class="simulator"><summary>Simulasi potensi untung/rugi</summary><p class="muted">Rencana mesin mengarah turun. Simulator jual kosong dinonaktifkan karena aplikasi tidak memverifikasi apakah akun/broker Anda dapat melakukan short selling.</p></details>`;
+  }
+  const capital = state.portfolio?.equity > 0 ? Math.floor(state.portfolio.equity) : "";
+  const lots = Number.isInteger(plan.lots) && plan.lots > 0 ? plan.lots : 1;
+  return `<details class="simulator">
+    <summary>Simulasi potensi untung/rugi</summary>
+    <p class="muted">Entry, stop, dan target dikunci dari rencana mesin. Pilih modal dan lot untuk melihat skenario sampai stop atau target.</p>
+    <div class="sim-levels"><span>Entry mesin <b>Rp${rp(plan.entry)}</b></span><span>Stop mesin <b>Rp${rp(plan.stop)}</b></span><span>Target mesin <b>Rp${rp(plan.target)}</b></span></div>
+    <form id="sim-form" data-symbol="${esc(data.symbol)}" data-analysis-id="${esc(data.analysis_id)}">
+      <label>Modal (Rp)<input id="sim-capital" type="number" min="1" step="1000" value="${esc(capital)}" required></label>
+      <label>Jumlah lot (1 lot = 100 saham)<input id="sim-lots" type="number" min="1" step="1" value="${lots}" required></label>
+      <label>Biaya per sisi (%) <span class="muted">opsional, isi tarif broker</span><input id="sim-fee" type="number" min="0" max="100" step="0.01" placeholder="belum dimasukkan"></label>
+      <button class="primary" type="submit">Hitung skenario</button>
+    </form>
+    <div id="sim-result" class="sim-result" aria-live="polite"></div>
+    <p class="sim-disclaimer">Estimasi skenario, bukan prediksi. Biaya, pajak, slippage, likuiditas, dan harga eksekusi dapat berbeda. Ketersediaan jual kosong/short tidak diperiksa.</p>
+  </details>`;
+}
+
+function renderSimulationResult(payload) {
+  const result = payload.result || {};
+  const pnl = (value) => value == null ? "—" : `Rp${rp(value)}`;
+  const target = result.fees_included ? result.net_target_pnl : result.gross_target_pnl;
+  const stop = result.fees_included ? result.net_stop_pnl : result.gross_stop_pnl;
+  const rewardRisk = result.fees_included ? result.net_reward_risk : result.gross_reward_risk;
+  return `<div class="sim-result-grid">
+    <div><span>Nilai pembelian</span><strong>Rp${rp(result.entry_notional)}</strong><small>${rp(result.capital_share_pct)}% dari modal</small></div>
+    <div><span>Jika mencapai target</span><strong class="up">${pnl(target)}</strong><small>${num(result.target_pnl_on_capital_pct, 2)}% dari modal · ${result.fees_included ? "setelah biaya input" : "kotor, biaya belum dihitung"}</small></div>
+    <div><span>Jika mencapai stop</span><strong class="down">${pnl(stop)}</strong><small>${num(result.stop_pnl_on_capital_pct, 2)}% dari modal · ${result.fees_included ? "setelah biaya input" : "kotor, biaya belum dihitung"}</small></div>
+    <div><span>Rasio skenario untung:rugi</span><strong>${rewardRisk == null ? "—" : `${num(rewardRisk, 2)}:1`}</strong><small>bukan probabilitas berhasil</small></div>
+  </div>
+  ${result.capital_covers_entry === false ? `<p class="sim-warning">Nilai pembelian melebihi modal yang dimasukkan.</p>` : ""}
+  ${result.direction === "short" ? `<p class="sim-warning">Ini skenario arah turun saja. Ketersediaan dan aturan short selling tidak diperiksa; jangan anggap bisa dieksekusi.</p>` : ""}
+  ${result.fees_included ? `<p class="muted">Biaya pulang-pergi terhitung: target Rp${rp(result.target_round_trip_fees)}, stop Rp${rp(result.stop_round_trip_fees)}. Pajak/slippage belum termasuk.</p>` : `<p class="muted">Tanpa tarif broker, angka di atas adalah estimasi kotor, bukan keuntungan bersih.</p>`}`;
+}
+
+function wireDecisionWidgets(data) {
+  const form = $("#sim-form");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("button[type=submit]", form);
+    const output = $("#sim-result");
+    button.disabled = true;
+    button.textContent = "Menghitung…";
+    output.textContent = "";
+    try {
+      const payload = await api("/api/simulate", {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: form.dataset.symbol,
+          analysis_id: form.dataset.analysisId,
+          lots: Number($("#sim-lots").value),
+          capital: Number($("#sim-capital").value),
+          fee_rate_pct: $("#sim-fee").value === "" ? null : Number($("#sim-fee").value),
+        }),
+      });
+      output.innerHTML = renderSimulationResult(payload);
+    } catch (error) {
+      output.innerHTML = `<p class="sim-warning">${esc(error.message)}</p>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Hitung skenario";
+    }
+  });
 }
 
 function paintVerdict(data) {  const decision = data.decision || {};
@@ -938,7 +1145,7 @@ function paintVerdict(data) {  const decision = data.decision || {};
       <div class="rating-name">${esc(data.name || "")} · ${esc(data.symbol)} · per ${esc(data.as_of)}</div>
     </div>
     <div class="confidence">
-      <div class="row"><span>Keyakinan</span><span>${Math.round((decision.confidence || 0) * 100)}%</span></div>
+      <div class="row"><span>Skor keyakinan mesin · bukan peluang profit</span><span>${Math.round((decision.confidence || 0) * 100)}%</span></div>
       <div class="bar"><i class="fill" style="width:${clamp01(decision.confidence || 0) * 100}%"></i></div>
     </div>
     <div class="plan">
@@ -957,8 +1164,12 @@ function paintVerdict(data) {  const decision = data.decision || {};
         ${sources.map(([kind, label]) => `<span class="tag ${kind}">${esc(label)}</span>`).join("")}
         <span class="tag">${data.recorded ? `jurnal #${data.recorded}` : "sudah tercatat hari ini"}</span>
       </div>
+      <div class="next-step"><button class="linklike" data-open-tab="roles">Buka Dewan Analisis →</button></div>
     </div>
+    ${renderDecisionSummary(data)}
+    ${renderSimulator(data)}
     ${aiStrip(data)}`;
+  wireDecisionWidgets(data);
 }
 
 function aiStrip(data) {  const ai = data.ai;
@@ -975,7 +1186,7 @@ function aiStrip(data) {  const ai = data.ai;
   return `<div class="ai-strip">
     <span class="rating-pill rating-${esc(ai.rating)}" style="font-size:10px;padding:3px 9px">
       AI: ${esc(ai.rating)}</span>
-    <span class="muted">${relation} · keyakinan ${Math.round((ai.conviction || 0) * 100)}%</span>
+    <span class="muted">${relation} · keyakinan model ${Math.round((ai.conviction || 0) * 100)}% · bukan peluang profit</span>
   </div>`;
 }
 
@@ -1083,6 +1294,7 @@ function viewScreener() {
       <td>${ai ? `<span class="rating-pill rating-${esc(ai.rating)}">${esc(ai.rating)}</span>` : '<span class="muted">—</span>'}</td>
       <td class="num">${rp(plan.entry)}</td><td class="num down">${rp(plan.stop)}</td><td class="num up">${rp(plan.target)}</td>
       <td class="screen-flags">${(row.flags || []).map((flag) => `<span class="tag">${esc(flag)}</span>`).join(" ")}</td>
+      <td><button class="ghost row-go" data-symbol="${esc(row.symbol)}">Analisis</button></td>
     </tr>`;
   }).join("");
   const outcome = !result ? "" : `<section class="screen-results" aria-live="polite">
@@ -1100,8 +1312,8 @@ function viewScreener() {
       : `<p class="screen-pickline muted">Tidak ada yang layak dipilih pada run ini. Nol pilihan adalah hasil yang sah.</p>`}
     <div class="screen-table-wrap"><table class="screen-table"><thead><tr>
       <th>Saham</th><th>Rating mesin</th><th class="num">Komposit</th><th>Rating AI</th>
-      <th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Catatan data</th>
-    </tr></thead><tbody>${rows || '<tr><td colspan="8" class="muted">Tidak ada kandidat lolos ke dewan.</td></tr>'}</tbody></table></div>
+      <th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Catatan data</th><th>Aksi</th>
+    </tr></thead><tbody>${rows || '<tr><td colspan="9" class="muted">Tidak ada kandidat lolos ke dewan.</td></tr>'}</tbody></table></div>
     ${rejected.length ? `<details class="screen-details"><summary>Ditolak (${rejected.length})</summary><ul>${rejected.map((item) =>
       `<li><strong>${esc(item.symbol)}</strong> <span class="tag">${esc(item.stage)}</span> — ${esc((item.reasons || []).join("; "))}</li>`).join("")}</ul></details>` : ""}
     ${errors.length ? `<details class="screen-details" open><summary>Gagal mengambil data (${errors.length})</summary><ul>${errors.map((item) =>
@@ -1119,7 +1331,9 @@ function viewScreener() {
       <label class="screen-universe">Kode saham <span class="muted">(opsional; kosong = universe.txt / watchlist)</span>
         <input id="screen-symbols" value="${esc(screen.symbols)}" placeholder="BBCA, BBRI, TLKM" autocomplete="off" spellcheck="false"></label>
       <label>Max pilihan <input id="screen-top" type="number" min="1" max="10" value="${esc(screen.maxPicks)}"></label>
-      <label>Shortlist <input id="screen-shortlist" type="number" min="1" max="40" value="${esc(screen.shortlist)}"></label>
+      <details class="screen-adv"><summary>Opsi lanjutan</summary>
+        <label>Shortlist <input id="screen-shortlist" type="number" min="1" max="40" value="${esc(screen.shortlist)}"></label>
+      </details>
       <label class="toggle"><input id="screen-ai" type="checkbox" ${screen.ai ? "checked" : ""}> pakai AI (1 panggilan)</label>
       <label class="toggle"><input id="screen-record" type="checkbox" ${screen.record ? "checked" : ""}> catat pilihan ke jurnal</label>
       <button id="screen-run" class="primary" type="submit" ${screen.busy ? "disabled" : ""}>${screen.busy ? "Memindai…" : "Mulai pemindaian"}</button>
@@ -1180,6 +1394,7 @@ function viewAdvice() {
   const data = state.analysis;
   if (!data) return needsAnalysis();
   const ai = data.ai;
+  const guidance = data.guidance;
 
   if (!ai) {
     const hint = data.ai_error
@@ -1196,9 +1411,10 @@ function viewAdvice() {
   }
 
   const relation = ai.agrees_with_desk
-    ? `<span class="tag proxy">sejalan dengan mesin</span>`
-    : `<span class="tag idx">beda: mesin ${esc(ai.mechanical_rating)}</span>`;
+    ? `<span class="tag">sejalan dengan rating gabungan</span>`
+    : `<span class="tag">beda dari rating gabungan: ${esc(ai.mechanical_rating)}</span>`;
   const action = ai.action || {};
+  const machinePlan = data.trader || {};
   const level = (label, value) => `<div><div class="k">${label}</div>
     <div class="v">${value == null ? "—" : rp(value)}</div></div>`;
 
@@ -1206,10 +1422,11 @@ function viewAdvice() {
     <div class="advice-head">
       <span class="rating-pill rating-${esc(ai.rating)}">${esc(ai.rating)}</span>
       <span class="tag">${esc(ai.model || "AI")}</span>
-      <span class="tag">keyakinan ${Math.round((ai.conviction || 0) * 100)}%</span>
+      <span class="tag">keyakinan model ${Math.round((ai.conviction || 0) * 100)}% · bukan peluang profit</span>
       ${ai.usage?.total_tokens ? `<span class="tag">${rp(ai.usage.total_tokens)} token</span>` : ""}
       ${relation}
     </div>
+    <p class="muted advice-disagreement">${esc(guidance?.why || "Ringkasan gabungan tersedia di panel utama.")} Keputusan akhir tetap transparan: jika sinyal material berbeda, ringkasan memilih Tunggu; angka keyakinan bukan probabilitas profit.</p>
     <div class="two-col advice-grid">
       <article class="advice-block">
         <h3>Tesis</h3>
@@ -1226,13 +1443,15 @@ function viewAdvice() {
           ${bulletList(ai.what_would_change, "Tidak disebutkan.")}
         </article>
         <article class="advice-block">
-          <h3>Rencana AI</h3>
+          <h3>Level dari mesin</h3>
+          <p class="muted">Entry, stop, dan target di bawah ini ditetapkan aturan deterministik KATALIS, bukan keluaran AI.</p>
           <div class="plan" style="margin-top:0">
-            ${level("Entry", action.entry)}
-            ${level("Stop", action.stop)}
-            ${level("Target", action.target)}
+            ${level("Entry", machinePlan.entry)}
+            ${level("Stop", machinePlan.stop)}
+            ${level("Target", machinePlan.target)}
           </div>
-          ${action.sizing_note ? `<p class="muted" style="margin-top:8px">${esc(action.sizing_note)}</p>` : ""}
+          <p class="muted">Entry: patokan harga rencana. Jika harga menyentuh Stop, risiko per saham sekitar Rp${rp(machinePlan.risk_per_share)} sebelum biaya/slippage. Jika mencapai Target, keuntungan kotor per saham sekitar Rp${rp(Math.abs((machinePlan.target || 0) - (machinePlan.entry || 0)))}. Harga eksekusi dapat berbeda.</p>
+          <p class="muted" style="margin-top:8px">AI dapat memberi rating dan alasan yang berbeda, tetapi tidak mengubah level harga mesin.</p>
         </article>
       </div>
     </div>
@@ -1257,8 +1476,13 @@ async function loadJournal() {
     const stats = payload.stats || {};
     const pill = (rating) => `<span class="rating-pill rating-${esc(rating)}"
         style="font-size:10px;padding:3px 9px">${esc(rating)}</span>`;
-    const rows = (payload.entries || []).map((entry) => `
-      <tr>
+    const rows = (payload.entries || []).map((entry) => {
+      const summary = entry.guidance?.why || entry.decision_summary || entry.summary?.summary || "Alasan lama tidak tersimpan.";
+      const savedAction = entry.guidance?.action || "";
+      const provenance = entry.trader ? `Level mesin saat dicatat: Entry ${rp(entry.trader.entry)}, stop ${rp(entry.trader.stop)}, target ${rp(entry.trader.target)}.` : "Level mesin tidak tersedia pada rekaman lama.";
+      const aiNote = entry.ai_summary?.thesis || "";
+      const aiRisk = entry.ai_summary?.risks || [];
+      return `<tr>
         <td class="num">${esc(entry.trade_date)}</td>
         <td>${esc(entry.symbol.replace(".JK", ""))}</td>
         <td>${pill(entry.rating)}</td>
@@ -1269,7 +1493,9 @@ async function loadJournal() {
         <td class="num ${tone(entry.benchmark_return)}">${entry.benchmark_return == null ? "—" : pct(entry.benchmark_return * 100)}</td>
         <td class="num ${tone(entry.alpha)}">${entry.alpha == null ? "—" : pct(entry.alpha * 100)}</td>
         <td>${entry.settled ? "dinilai" : "menunggu"}</td>
-      </tr>`).join("");
+        <td><details class="journal-detail"><summary>Lihat alasan</summary><p><strong>${esc(savedAction)}</strong> ${esc(summary)}</p><p>${esc(provenance)}</p><p>Rating mesin ${esc(entry.rating)}${entry.ai_rating ? ` · rating AI ${esc(entry.ai_rating)}` : " · tanpa rating AI"}; hasil sesudah ${rp(entry.holding_days)} sesi dibandingkan dengan IHSG.</p>${aiNote ? `<p><strong>Catatan AI saat itu:</strong> ${esc(aiNote)}</p>` : ""}${aiRisk.length ? `<p><strong>Risiko AI:</strong> ${aiRisk.map(esc).join("; ")}</p>` : ""}</details></td>
+      </tr>`;
+    }).join("");
 
     panel.innerHTML = `
       <div class="toolbar">
@@ -1283,8 +1509,8 @@ async function loadJournal() {
       <table>
         <thead><tr><th>Tanggal</th><th>Kode</th><th>Mesin</th><th>AI</th><th class="num">Harga</th>
         <th class="num">Keluar</th><th class="num">Return</th><th class="num">IHSG</th>
-        <th class="num">Alpha</th><th>Status</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="10" class="muted">Belum ada keputusan. Jalankan analisis dulu.</td></tr>'}</tbody>
+        <th class="num">Alpha</th><th>Status</th><th>Alasan saat keputusan</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="11" class="muted">Belum ada keputusan. Jalankan analisis dulu.</td></tr>'}</tbody>
       </table>`;
 
     $("#settle").addEventListener("click", settleJournal);
@@ -1360,6 +1586,8 @@ function paintPortfolio(payload) {
     const lots = Number($("#p-qty").value);
     const average = Number($("#p-avg").value);
     if (!symbol || !lots || !average) return toast("Isi kode, jumlah lot, dan harga rata-rata.", true);
+    const existing = state.portfolio?.positions?.some((position) => position.symbol === symbol);
+    if (existing && !confirm(`Posisi ${symbol} sudah ada. Timpa dengan ${lots} lot @ ${rp(average)}?`)) return;
     try {
       await api("/api/portfolio", {
         method: "POST",
@@ -1381,7 +1609,33 @@ function paintPortfolio(payload) {
 
 /* ---------- events ---------- */
 
+function activateTab(button) {
+  $$("#tabs button").forEach((other) => {
+    const on = other === button;
+    other.classList.toggle("on", on);
+    other.setAttribute("aria-selected", String(on));
+    other.tabIndex = on ? 0 : -1;
+  });
+  state.tab = button.dataset.tab;
+  paintPanel(state.tab);
+}
+
+function openTab(name) {
+  const button = document.querySelector(`#tabs button[data-tab="${name}"]`);
+  if (button) button.click();
+}
+
 function wireEvents() {
+  wireWatchlist();
+  document.addEventListener("click", (event) => {
+    const opener = event.target.closest("[data-open-tab]");
+    if (opener) openTab(opener.dataset.openTab);
+    const go = event.target.closest(".row-go");
+    if (go) {
+      openSymbol(go.dataset.symbol);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  });
   $("#analyse").addEventListener("click", () => openSymbol($("#symbol").value, { analyse: true }));
   $("#symbol").addEventListener("keydown", (event) => {
     if (event.key === "Enter") openSymbol($("#symbol").value, { analyse: true });
@@ -1418,12 +1672,20 @@ function wireEvents() {
     });
   }
 
-  $$("#tabs button").forEach((button) => button.addEventListener("click", () => {
-    $$("#tabs button").forEach((other) => other.classList.remove("on"));
-    button.classList.add("on");
-    state.tab = button.dataset.tab;
-    paintPanel(state.tab);
-  }));
+  $$("#tabs button").forEach((button) => {
+    button.setAttribute("aria-selected", String(button.classList.contains("on")));
+    button.tabIndex = button.classList.contains("on") ? 0 : -1;
+    button.addEventListener("click", () => activateTab(button));
+    button.addEventListener("keydown", (event) => {
+      const dir = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!dir) return;
+      event.preventDefault();
+      const tabs = $$("#tabs button");
+      const next = tabs[(tabs.indexOf(button) + dir + tabs.length) % tabs.length];
+      next.focus();
+      activateTab(next);
+    });
+  });
 
   $("#refresh").addEventListener("click", () => { loadWatchlist(); loadBenchmark(); });
 
@@ -1431,6 +1693,7 @@ function wireEvents() {
     event.preventDefault();
     const symbol = normaliseSymbol($("#add-symbol").value);
     if (!symbol) return;
+    if (!/^[A-Z]{1,6}(\.JK)?$/.test(symbol)) return toast(`"${symbol}" bukan kode saham yang valid.`, true);
     try {
       await api("/api/watchlist", { method: "POST", body: JSON.stringify({ add: [symbol] }) });
       $("#add-symbol").value = "";
@@ -1448,6 +1711,7 @@ if (typeof window !== "undefined") {
    itself never reads these. */
 if (typeof module !== "undefined") {
   module.exports = { renderCandles, viewRoles, viewDebate, viewRisk, viewAdvice, viewIdle,
-                     aiStrip, paintVerdict, showCross, hideCross, axisLabel, fullLabel,
+                     aiStrip, paintVerdict, renderDecisionSummary, renderSimulator,
+                      renderSimulationResult, showCross, hideCross, axisLabel, fullLabel,
                      viewScreener, state, prefs, esc, rp, pct };
 }

@@ -8,6 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f14'/%3E%3Cpath d='M18 44V20M18 32l14-12M18 32l14 12' stroke='%23f0b429' stroke-width='5' stroke-linecap='round' fill='none'/%3E%3Crect x='40' y='22' width='7' height='20' rx='2' fill='%2322c55e'/%3E%3C/svg%3E">
 </head>
 <body>
+<noscript><p class="noscript">Dashboard ini butuh JavaScript: tanpa itu hanya kerangka halaman yang tampil.</p></noscript>
 
 <header class="topbar">
   <div class="brand">
@@ -35,7 +36,7 @@
 
 <section class="searchbar">
   <div class="searchfield">
-    <input id="symbol" placeholder="Kode saham — BBCA, BBRI, TLKM…" autocomplete="off" spellcheck="false"
+    <input id="symbol" placeholder="Kode saham, mis. BBCA, BBRI, TLKM" autocomplete="off" spellcheck="false"
            aria-label="Kode saham">
     <button id="analyse" class="primary">Analisis</button>
   </div>
@@ -51,7 +52,7 @@
   <aside class="card watchlist">
     <div class="card-head">
       <h2>Watchlist</h2>
-      <button id="refresh" class="ghost" title="Muat ulang harga">⟳</button>
+      <button id="refresh" class="ghost" title="Muat ulang harga" aria-label="Muat ulang harga watchlist">⟳</button>
     </div>
     <div id="watchlist" class="watchlist-body"><div class="skeleton"></div><div class="skeleton"></div></div>
     <form id="add-form" class="add-row">
@@ -73,16 +74,17 @@
       </div>
       <div class="chart-tools">
         <span class="chart-stamp" id="chart-stamp"></span>
-        <div class="ranges" id="ranges">
+        <div class="ranges" id="ranges" role="group" aria-label="Rentang waktu chart">
           <button data-range="1d">1H</button>
           <button data-range="5d">5H</button>
+          <span class="sep" aria-hidden="true"></span>
           <button data-range="1mo">1B</button>
           <button data-range="3mo">3B</button>
           <button data-range="6mo" class="on">6B</button>
           <button data-range="1y">1T</button>
           <button data-range="2y">2T</button>
         </div>
-        <button id="chart-refresh" class="ghost" title="Muat ulang chart sekarang">⟳</button>
+        <button id="chart-refresh" class="ghost" title="Muat ulang chart sekarang" aria-label="Muat ulang chart sekarang">⟳</button>
       </div>
     </div>
     <div id="chart" class="chart"><div class="skeleton tall"></div></div>
@@ -99,7 +101,7 @@
 </main>
 
 <nav class="tabs" id="tabs" role="tablist">
-  <button data-tab="roles" class="on" role="tab">Dewan Analis</button>
+  <button data-tab="roles" class="on" role="tab" aria-selected="true">Dewan Analis</button>
   <button data-tab="advice" role="tab">Nasihat AI</button>
   <button data-tab="debate" role="tab">Debat</button>
   <button data-tab="risk" role="tab">Risiko</button>
@@ -107,7 +109,7 @@
   <button data-tab="journal" role="tab">Jurnal</button>
   <button data-tab="portfolio" role="tab">Portofolio</button>
 </nav>
-<section class="panel" id="panel">
+<section class="panel" id="panel" role="tabpanel" tabindex="0">
   <p class="muted pad">Jalankan analisis untuk melihat dewan analis bekerja.</p>
 </section>
 

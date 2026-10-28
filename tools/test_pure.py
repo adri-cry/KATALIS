@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import desk, llm, market, screener, store  # noqa: E402
+from core import advisor, desk, guidance, llm, market, screener, simulation, store  # noqa: E402
 import app as app_module  # noqa: E402
 
 CHECKS: list[tuple[str, bool, str]] = []
@@ -128,18 +128,43 @@ check("keyakinan: peran tanpa data menurunkan keyakinan",
 check("bobot: jumlah bobot peran = 1", abs(sum(desk._WEIGHTS.values()) - 1) < 1e-9)
 check("bobot: lima peran dikenal", set(desk._WEIGHTS) == {"market", "flow", "bandar", "fundamental", "news"})
 
+# ---- IDX bridge latency bounds ------------------------------------------------
+# Interactive role reads should fail fast and let their callers use proxies.
+import subprocess
+original_idx_run = desk.idxbridge.subprocess.run
+original_idx_binary = desk.idxbridge.binary
+idx_calls = []
+try:
+    desk.idxbridge.binary = lambda: "idx-test"
+
+    def slow_idx_call(*args, **kwargs):
+        idx_calls.append(kwargs)
+        raise subprocess.TimeoutExpired("idx-test", kwargs.get("timeout"))
+
+    desk.idxbridge.subprocess.run = slow_idx_call
+    try:
+        desk.idxbridge.run("stocks", "foreign", "TEST")
+    except desk.idxbridge.BridgeUnavailable:
+        pass
+    check("idx bridge: satu timeout singkat tanpa retry berulang",
+          len(idx_calls) == 1 and idx_calls[0].get("timeout") == 20,
+          str(idx_calls))
+finally:
+    desk.idxbridge.subprocess.run = original_idx_run
+    desk.idxbridge.binary = original_idx_binary
+
 # ---- parallel role reads -----------------------------------------------------
-# Two independent external-role stubs must overlap; results must retain the
+# All four independent external-role stubs must overlap; results must retain the
 # established flow/bandar/fundamental/news order for downstream rendering.
 from threading import Barrier
 
-role_barrier = Barrier(2)
+role_barrier = Barrier(4)
 original_roles = (desk._role_market, desk._role_flow, desk._role_bandar,
                   desk._role_fundamental, desk._role_news)
 try:
     def parallel_stub(key):
         def run(*args):
-            if key in ("flow", "bandar"):
+            if key in ("flow", "bandar", "fundamental", "news"):
                 role_barrier.wait(timeout=2)
             return {"key": key, "available": True, "score": 0.0}
         return run
@@ -198,6 +223,140 @@ check("rencana: tanpa ekuitas tidak mengarang ukuran", desk._plan({"last": 5000.
 
 short_plan = desk._plan({"last": 5000.0, "atr14": 100.0}, "Sell", equity=0)
 check("rencana: Sell menaruh stop di atas", short_plan["stop"] > short_plan["entry"])
+
+# ---- beginner guidance and simulator ----------------------------------------
+
+def guidance_fixture(machine="Buy", ai="Buy", technical=1.0, available=5, sessions=80,
+                     atr_pct=2.5, rr=1.5, range_="6mo", as_of=None):
+    names = ["Analis Teknikal", "Aliran", "Bandar", "Fundamental", "Berita"]
+    roles = []
+    for index, name in enumerate(names):
+        roles.append({"key": "market" if index == 0 else f"role{index}", "name": name,
+                      "score": technical if index == 0 else 0.2, "available": index < available,
+                      "source": "proxy" if index == 0 else "idx",
+                      "bull": ["harga di atas SMA20"] if index == 0 else [],
+                      "bear": ["RSI tinggi"] if index == 0 else [], "warning": ""})
+    if as_of is None:
+        as_of = datetime.now(timezone(timedelta(hours=7))).date().isoformat()
+    return {"range": range_, "holding_days": 5, "as_of": as_of,
+            "decision": {"rating": machine, "confidence": 0.74},
+            "manager": {"composite": 1.0},
+            "roles": roles,
+            "indicators": {"sessions": sessions, "last": 1000, "sma20": 980, "sma50": 950,
+                           "atr_pct": atr_pct, "max_drawdown_pct": -8},
+            "trader": {"entry": 1000, "stop": 950, "target": 1080,
+                       "risk_per_share": 50, "reward_risk": rr},
+            "ai": ({"rating": ai, "conviction": 0.8, "risks": ["volatilitas"],
+                    "what_would_change": ["tutup di bawah SMA20"]} if ai else None),
+            "ai_error": None}
+
+
+g = guidance.build(guidance_fixture())
+check("ringkasan: arah selaras -> Beli dan menamai mesin/AI", g["action"] == "Beli" and g["status"] == "selaras")
+check("ringkasan: confidence diberi label heuristik, bukan probabilitas", "bukan probabilitas" in g["machine_confidence_note"])
+check("ringkasan: source/proxy quality disclosed", "Analis Teknikal" in g["data_quality"]["proxy_roles"])
+
+g_conflict = guidance.build(guidance_fixture(machine="Buy", ai="Sell", technical=1.0))
+check("resolver: konflik mesin vs AI -> Tunggu, kedua rating tetap tampil",
+      g_conflict["action"] == "Tunggu" and g_conflict["machine_rating"] == "Buy"
+      and g_conflict["ai_rating"] == "Sell" and len(g_conflict["conflicts"]) >= 1)
+
+g_technical = guidance.build(guidance_fixture(machine="Buy", ai="Buy", technical=-1.2))
+check("resolver: konflik teknikal bearish vs gabungan/AI bullish -> Tunggu",
+      g_technical["action"] == "Tunggu" and any(c["type"] in {"gabungan_vs_teknikal", "tren_vs_gabungan"} for c in g_technical["conflicts"]))
+
+g_missing = guidance.build(guidance_fixture(available=2, sessions=15, ai=None))
+check("data hilang: kembalikan Data belum cukup, bukan netral",
+      g_missing["action"] == "Data belum cukup" and g_missing["data_quality"]["status"] == "terbatas")
+
+g_proxy = guidance.build(guidance_fixture(available=5))
+check("confidence note: tidak ada klaim peluang profit",
+      "probabilitas" in g_proxy["machine_confidence_note"] and "kalibrasi" in g_proxy["ai_confidence_note"])
+
+g_risk = guidance.build(guidance_fixture(atr_pct=8.2, rr=0.8))
+check("risiko: volatilitas tinggi/R:R <1 menurunkan Beli ke Tunggu",
+      g_risk["action"] == "Tunggu" and len(g_risk["risk"]["flags"]) == 2)
+
+g_tf = guidance.build(guidance_fixture(range_="1d"))
+check("timeframe: intraday vs horizon 5 sesi -> Tunggu",
+      g_tf["action"] == "Tunggu" and g_tf["status"] == "rentang_tidak_selaras")
+g_stale = guidance.build(guidance_fixture(as_of="2026-07-01"))
+check("kesegaran: snapshot lebih dari 7 hari tidak menghasilkan Beli",
+      g_stale["action"] == "Data belum cukup" and g_stale["stale_snapshot"])
+g_missing_date = guidance.build(guidance_fixture(as_of=""))
+check("kesegaran: tanggal snapshot yang hilang tidak menghasilkan Beli",
+      g_missing_date["action"] == "Data belum cukup" and g_missing_date["stale_snapshot"])
+
+scenario = simulation.calculate(1000, 950, 1100, 2, 500000, None)
+check("simulator: lot 100, kotor target dan stop dihitung dari level mesin",
+      scenario["quantity"] == 200 and scenario["gross_target_pnl"] == 20000
+      and scenario["gross_stop_pnl"] == -10000 and not scenario["fees_included"])
+scenario_fee = simulation.calculate(1000, 950, 1100, 2, 500000, 0.25)
+check("simulator: biaya dua sisi diterapkan dan net lebih rendah",
+      scenario_fee["target_round_trip_fees"] == 1050
+      and scenario_fee["net_target_pnl"] == 18950
+      and scenario_fee["target_pnl_on_capital_pct"] == 3.79
+      and scenario_fee["net_stop_pnl"] < scenario_fee["gross_stop_pnl"])
+
+try:
+    simulation.calculate(1000, 950, 1100, 0, 500000)
+    invalid_lots = False
+except ValueError:
+    invalid_lots = True
+check("simulator: lot nol ditolak", invalid_lots)
+try:
+    simulation.calculate(1000, 950, 1100, 2, 500000, -0.1)
+    invalid_fee = False
+except ValueError:
+    invalid_fee = True
+check("simulator: tarif biaya negatif ditolak", invalid_fee)
+try:
+    simulation.calculate(1000, 1050, 900, 2, 500000)
+    short_ok = True
+except ValueError:
+    short_ok = False
+check("simulator: short selling tak diasumsikan tersedia", not short_ok)
+
+# The live advisor schema no longer asks for levels, and any returned fake levels
+# are ignored in favour of the desk's exact plan.
+real_status_for_advisor, real_chat_for_advisor = llm.status, llm.chat_json
+try:
+    llm.status = lambda: {"configured": True}
+    llm.chat_json = lambda *_args, **_kwargs: {
+        "rating": "Sell", "conviction": 0.7, "thesis": "SMA20 lemah",
+        "risks": ["volatilitas"], "action": {"entry": 1, "stop": 2, "target": 3},
+        "what_would_change": [], "confidence_note": "data terbatas"}
+    advisor_result = advisor.advise({"decision": {"rating": "Buy"},
+                                     "trader": {"entry": 1000, "stop": 950, "target": 1080},
+                                     "symbol": "TEST.JK", "indicators": {}, "roles": []})
+    check("advisor: model tak dapat mengganti level; action tetap dari mesin",
+          advisor_result["action"]["entry"] == 1000 and advisor_result["action"]["stop"] == 950
+          and advisor_result["action"]["target"] == 1080 and advisor_result["action"]["level_source"] == "mesin")
+    check("advisor: prompt melarang model memberi level harga", "jangan membuat angka level harga" in advisor._SYSTEM)
+finally:
+    llm.status, llm.chat_json = real_status_for_advisor, real_chat_for_advisor
+
+# Snapshot-bound API helper: only the exact current analysis may be simulated.
+original_latest, original_analysis_id = app_module._LATEST_ANALYSES, "analysis-snapshot-1"
+try:
+    app_module._LATEST_ANALYSES = {"TEST.JK": {
+        "analysis_id": original_analysis_id, "as_of": "2026-07-08",
+        "guidance": {"action": "Beli"},
+        "trader": {"entry": 1000, "stop": 950, "target": 1100}}}
+    code, payload = app_module.simulate_latest("TEST.JK", original_analysis_id, 2, 500000)
+    check("API simulator: hanya memakai level snapshot mesin yang sama",
+          code == 200 and payload["plan_source"] == "mesin" and payload["result"]["gross_target_pnl"] == 20000)
+    stale_code, _ = app_module.simulate_latest("TEST.JK", "stale-id", 2, 500000)
+    check("API simulator: snapshot kedaluwarsa ditolak", stale_code == 409)
+    app_module._LATEST_ANALYSES["TEST.JK"]["guidance"]["action"] = "Tunggu"
+    wait_code, _ = app_module.simulate_latest("TEST.JK", original_analysis_id, 2, 500000)
+    check("API simulator: keputusan Tunggu tidak dapat dipaksa simulasi beli", wait_code == 409)
+    app_module._LATEST_ANALYSES["TEST.JK"]["guidance"]["action"] = "Beli"
+    check("API simulator: entry di respons berasal dari rencana server",
+          payload["result"]["entry"] == 1000 and payload["result"]["stop"] == 950
+          and payload["result"]["target"] == 1100)
+finally:
+    app_module._LATEST_ANALYSES = original_latest
 
 # ---- symbol normalisation ---------------------------------------------------
 check("simbol: empat huruf -> .JK", market.normalise("bbca") == "BBCA.JK")
