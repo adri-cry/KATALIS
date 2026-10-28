@@ -7,6 +7,12 @@
 // the API returned.
 //
 //   node tools/check_ui.mjs [base-url]
+//
+// Unlike tools/test_pure.mjs this is NOT an offline test: it needs a running
+// server (python app.py) and a working Yahoo Finance connection, because the
+// fixture is a real analysis of BBCA.JK. Run it manually against localhost; it
+// is deliberately not part of CI. Set CHECK_AI=1 only against the stub gateway
+// (tools/stub_openai.mjs), never against a metered account.
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -84,7 +90,8 @@ if (analysis.ai) {
   check("AI: tesis dirender", advice.includes("Tesis") && advice.length > 800);
   check("AI: rating AI tampil", advice.includes(`rating-${analysis.ai.rating}`));
   check("AI: risiko dan pembatal tesis", advice.includes("Risiko") && advice.includes("Yang membatalkan tesis"));
-  check("AI: rencana AI tampil", advice.includes("Rencana AI"));
+  check("AI: level harga tetap dari mesin",
+    advice.includes("Level dari mesin") && advice.includes("bukan keluaran AI"));
   check("AI: disclaimer ikut dirender", advice.toLowerCase().includes("bukan nasihat investasi"));
   check("AI: strip di kartu putusan", ui.aiStrip(analysis).includes(`AI: ${analysis.ai.rating}`));
 } else {
@@ -96,7 +103,7 @@ if (analysis.ai) {
 }
 
 // ---- the shell must contain every element the wiring reaches for at boot -------
-// Panel forms (#p-add, #settleâ€¦) are created by the renderers, so only the ids
+// Panel forms (#p-add, #settle…) are created by the renderers, so only the ids
 // wireEvents() touches are expected to be in the static HTML.
 const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
 const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
@@ -126,7 +133,7 @@ check("pemindai: alasan penolakan dan escape tampil",
 ui.state.screener.result = null;
 check("analisis: progress, durasi, dan keterangan AI tersedia",
   source.includes("analysisProgressView") && source.includes("padStart(2, \"0\")")
-  && source.includes("halaman ter-refresh") && source.includes('role="status"')
+  && source.includes("status tidak dapat dipulihkan setelah refresh") && source.includes('role="status"')
   && source.includes("/api/analyze/status?id=")
   && source.includes("Older running server has only the original synchronous endpoint")
   && source.includes("/api/analyze/start"));

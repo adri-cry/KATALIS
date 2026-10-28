@@ -439,12 +439,24 @@ proksi harga, dan kartunya berlabel `proksi`.
 
 ## Uji
 
+Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
+
 ```bash
-node tools/check_ui.mjs          # renderer dashboard terhadap data sungguhan
+python tools/test_pure.py        # 97 cek backend: indikator, dewan, jurnal, pemindai
+node tools/test_pure.mjs         # 39 cek frontend: ringkasan, simulator, chart, escape
 ```
 
-15 pemeriksaan: SVG grafik, lima kartu peran, penandaan sumber, dua kolom debat, tiga
-sikap risiko, konsistensi id HTML↔JS, jurnal, dan portofolio.
+Satu pemeriksaan manual, karena memakai analisis sungguhan dari Yahoo Finance:
+
+```bash
+python app.py                    # terminal 1
+node tools/check_ui.mjs          # terminal 2 — 38 pemeriksaan render (32 tanpa AI)
+```
+
+`check_ui.mjs` memeriksa SVG grafik, lima kartu peran, penandaan sumber, dua kolom debat,
+tiga sikap risiko, konsistensi id HTML↔JS, jurnal, dan portofolio. Ia sengaja tidak masuk
+CI: hasilnya bergantung pada jaringan. `CHECK_AI=1` hanya untuk `tools/stub_openai.mjs`,
+jangan untuk akun berbayar.
 
 ## Kredit & lisensi
 
