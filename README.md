@@ -443,7 +443,7 @@ Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada
 
 ```bash
 python tools/test_pure.py        # 97 cek backend: indikator, dewan, jurnal, pemindai
-node tools/test_pure.mjs         # 39 cek frontend: ringkasan, simulator, chart, escape
+node tools/test_pure.mjs         # 43 cek frontend: ringkasan, simulator, chart, escape
 ```
 
 Satu pemeriksaan manual, karena memakai analisis sungguhan dari Yahoo Finance:

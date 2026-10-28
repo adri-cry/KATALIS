@@ -9,8 +9,10 @@ const state = {
   analysis: null,
   analysisJob: null,
   analysisTimer: null,
+  analysisCache: {},
   journal: null,
   portfolio: null,
+  watch: null,
   screener: { result: null, busy: false, symbols: "", maxPicks: 5, shortlist: 15, ai: false, record: false },
   health: null,
   chart: null,
@@ -346,6 +348,16 @@ async function openSymbol(symbol, { analyse = false } = {}) {
   const tasks = [loadMarket(state.symbol, state.range)];
   if (analyse) {
     tasks.push(runAnalysis());
+  } else if (analysisBelongsTo(state.analysisJob, state.symbol)) {
+    // A job is still running for the symbol being selected: show its progress.
+    paintAnalysisProgress(state.analysisJob);
+  } else if (state.analysisCache[state.symbol]) {
+    // Its analysis finished while another symbol was on screen; the verdict was
+    // kept here instead of being painted onto the wrong chart.
+    const cached = state.analysisCache[state.symbol];
+    delete state.analysisCache[state.symbol];
+    state.analysis = cached;
+    paintVerdict(cached);
   } else {
     // Selecting a symbol costs nothing; running the desk is a separate click.
     paintIdleVerdict();
@@ -869,13 +881,31 @@ function analysisProgressView(job) {
   </div>`;
 }
 
+/* A job carries the symbol it was started for. A job without one predates this
+   field, and is treated as belonging to whatever is on screen. */
+function analysisBelongsTo(job, symbol) {
+  if (!job) return false;
+  return !job.symbol || !symbol || job.symbol === symbol;
+}
+
 function paintAnalysisProgress(job) {
+  if (!analysisBelongsTo(job, state.symbol)) return;   // never paint A's progress over B's chart
   const verdict = $("#verdict");
   if (verdict) verdict.innerHTML = analysisProgressView(job);
   const button = $("#analyse");
   if (button) {
     button.disabled = true;
     button.textContent = "Menganalisis…";
+  }
+}
+
+function paintJobError(job, message) {
+  if (!analysisBelongsTo(job, state.symbol)) {
+    toast(`Analisis ${job?.symbol || "sebelumnya"} gagal: ${message}`, true);
+    return;
+  }
+  if ($("#verdict")) {
+    $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
   }
 }
 
@@ -906,6 +936,13 @@ async function pollAnalysisJob(job) {
     if (status.status === "complete") {
       const payload = await api(`/api/analyze/result?id=${encodeURIComponent(job.id)}`);
       finishAnalysisJob();
+      if (!analysisBelongsTo(payload, state.symbol)) {
+        // The operator moved on. Keep the result instead of painting it onto
+        // another symbol's chart, and hand it back when they return.
+        state.analysisCache[payload.symbol] = payload;
+        toast(`Analisis ${payload.symbol} selesai — pilih simbol itu untuk melihat hasilnya.`);
+        return;
+      }
       state.analysis = payload;
       paintVerdict(payload);
       paintPanel(state.tab);
@@ -916,21 +953,20 @@ async function pollAnalysisJob(job) {
       const message = status.error || status.message || "Analisis gagal";
       finishAnalysisJob();
       toast(`Analisis gagal: ${message}`, true);
-      $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
+      paintJobError(job, message);
       return;
     }
     paintAnalysisProgress(job);
   } catch (error) {
     if (error.message.includes("tidak ditemukan") || error.message.includes("404")) {
       finishAnalysisJob();
-      const message = "Pekerjaan analisis tidak ditemukan. Server mungkin sempat dimulai ulang; silakan tekan Analisis untuk menjalankan kembali.";
-      if ($("#verdict")) $("#verdict").innerHTML = `<div class="empty"><p>${esc(message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
+      paintJobError(job, "Pekerjaan analisis tidak ditemukan. Server mungkin sempat dimulai ulang; silakan tekan Analisis untuk menjalankan kembali.");
       return;
     }
     if (error.message.includes("500")) {
       finishAnalysisJob();
       toast(`Analisis gagal: ${error.message}`, true);
-      $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
+      paintJobError(job, error.message);
       return;
     }
     // A transient poll/network failure must not discard the in-flight job.
@@ -947,7 +983,12 @@ async function resumeAnalysisJob(saved = prefs.analysisJob) {
 }
 
 async function runAnalysis() {
-  if (state.analysisJob) return;
+  if (state.analysisJob) {
+    if (!analysisBelongsTo(state.analysisJob, state.symbol)) {
+      toast(`Analisis ${state.analysisJob.symbol} masih berjalan. Tunggu sampai selesai.`, true);
+    }
+    return;
+  }
   const button = $("#analyse");
   if (button) { button.disabled = true; button.textContent = "Menyiapkan…"; }
   const job = { symbol: state.symbol, stage: "queue", status: "running", started_at: Date.now() / 1000 };
@@ -986,7 +1027,7 @@ async function runAnalysis() {
   } catch (error) {
     finishAnalysisJob();
     toast(`Analisis gagal dimulai: ${error.message}`, true);
-    $("#verdict").innerHTML = `<div class="empty"><p>${esc(error.message)}</p><p class="muted">Tekan Analisis untuk mencoba lagi.</p></div>`;
+    paintJobError(job, error.message);
   }
 }
 
@@ -1713,5 +1754,5 @@ if (typeof module !== "undefined") {
   module.exports = { renderCandles, viewRoles, viewDebate, viewRisk, viewAdvice, viewIdle,
                      aiStrip, paintVerdict, renderDecisionSummary, renderSimulator,
                       renderSimulationResult, showCross, hideCross, axisLabel, fullLabel,
-                     viewScreener, state, prefs, esc, rp, pct };
+                     viewScreener, state, prefs, esc, rp, pct, analysisBelongsTo };
 }

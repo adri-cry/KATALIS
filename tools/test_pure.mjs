@@ -158,6 +158,17 @@ const simResultHtml = ui.renderSimulationResult({ result: { entry_notional: 2000
 check("simulator: labels gross P/L and non-probability risk", simResultHtml.includes("kotor, biaya belum dihitung")
   && simResultHtml.includes("bukan probabilitas berhasil"));
 
+// ---- a job belongs to the symbol it was started for --------------------------
+// Painting a verdict belonging to another symbol over the current chart was the
+// bug: switching symbols mid-analysis must not leak B's verdict onto A.
+check("job: same symbol belongs", ui.analysisBelongsTo({ symbol: "BBCA.JK" }, "BBCA.JK") === true);
+check("job: another symbol does not belong",
+  ui.analysisBelongsTo({ symbol: "BBCA.JK" }, "BBRI.JK") === false);
+check("job: legacy job without a symbol stays visible",
+  ui.analysisBelongsTo({}, "BBRI.JK") === true
+  && ui.analysisBelongsTo({ symbol: "BBCA.JK" }, "") === true);
+check("job: no job belongs to nothing", ui.analysisBelongsTo(null, "BBCA.JK") === false);
+
 // ---- report -----------------------------------------------------------------
 let failed = 0;
 for (const item of checks) {
