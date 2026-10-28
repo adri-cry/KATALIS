@@ -80,7 +80,11 @@ async function api(path, options = {}) {
     ...options,
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (!response.ok || payload.error) {
+    const error = new Error(payload.error || `HTTP ${response.status}`);
+    error.status = response.status;      // classify by status, never by message text
+    throw error;
+  }
   return payload;
 }
 
@@ -934,7 +938,19 @@ async function pollAnalysisJob(job) {
     state.analysisJob = job;
     prefs.analysisJob = job;
     if (status.status === "complete") {
-      const payload = await api(`/api/analyze/result?id=${encodeURIComponent(job.id)}`);
+      let payload;
+      try {
+        payload = await api(`/api/analyze/result?id=${encodeURIComponent(job.id)}`);
+      } catch (error) {
+        // The job has finished, so polling it again can only repeat this failure.
+        // A missing status is a network blip worth retrying; anything else stops.
+        if (!error.status) throw error;
+        finishAnalysisJob();
+        const message = `Hasil analisis tidak dapat diambil: ${error.message}`;
+        toast(message, true);
+        paintJobError(job, message);
+        return;
+      }
       finishAnalysisJob();
       if (!analysisBelongsTo(payload, state.symbol)) {
         // The operator moved on. Keep the result instead of painting it onto
@@ -958,18 +974,18 @@ async function pollAnalysisJob(job) {
     }
     paintAnalysisProgress(job);
   } catch (error) {
-    if (error.message.includes("tidak ditemukan") || error.message.includes("404")) {
+    if (error.status === 404) {
       finishAnalysisJob();
       paintJobError(job, "Pekerjaan analisis tidak ditemukan. Server mungkin sempat dimulai ulang; silakan tekan Analisis untuk menjalankan kembali.");
       return;
     }
-    if (error.message.includes("500")) {
+    if (error.status >= 500) {
       finishAnalysisJob();
       toast(`Analisis gagal: ${error.message}`, true);
       paintJobError(job, error.message);
       return;
     }
-    // A transient poll/network failure must not discard the in-flight job.
+    // A transient network failure (no HTTP status) must not discard the in-flight job.
   }
   state.analysisTimer = setTimeout(() => pollAnalysisJob(job), 1200);
 }
@@ -1002,7 +1018,7 @@ async function runAnalysis() {
         body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
       });
     } catch (error) {
-      if (!/unknown endpoint|404/i.test(error.message)) throw error;
+      if (error.status !== 404 || !/unknown endpoint/i.test(error.message)) throw error;
       // Older running server has only the original synchronous endpoint.
       // Keep the visible progress UI and fall back instead of surfacing 404.
       Object.assign(job, { stage: "legacy", message: "Server belum diperbarui; analisis tetap berjalan, tetapi status tidak dapat dipulihkan setelah refresh." });
@@ -1762,5 +1778,5 @@ if (typeof module !== "undefined") {
                      aiStrip, paintVerdict, renderDecisionSummary, renderSimulator,
                       renderSimulationResult, showCross, hideCross, axisLabel, fullLabel,
                      viewScreener, state, prefs, esc, rp, pct, analysisBelongsTo,
-                     renderPlan, statCards };
+                     renderPlan, statCards, api };
 }

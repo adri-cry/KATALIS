@@ -443,14 +443,14 @@ Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada
 
 ```bash
 python tools/test_pure.py        # 103 cek backend: indikator, dewan, jurnal, pemindai
-node tools/test_pure.mjs         # 45 cek frontend: ringkasan, simulator, chart, escape
+node tools/test_pure.mjs         # 46 cek frontend: ringkasan, simulator, chart, escape
 ```
 
 Satu pemeriksaan manual, karena memakai analisis sungguhan dari Yahoo Finance:
 
 ```bash
 python app.py                    # terminal 1
-node tools/check_ui.mjs          # terminal 2 — 40 pemeriksaan render (34 tanpa AI)
+node tools/check_ui.mjs          # terminal 2 — 42 pemeriksaan render (36 tanpa AI)
 ```
 
 `check_ui.mjs` memeriksa SVG grafik, lima kartu peran, penandaan sumber, dua kolom debat,

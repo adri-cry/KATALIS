@@ -146,6 +146,22 @@ const ids = [...new Set([...wiring.matchAll(/\$\("#([a-z0-9-]+)"\)/g)].map((matc
 const missing = ids.filter((id) => !html.includes(`id="${id}"`));
 check(`shell: ${ids.length} elemen awal ada di HTML`, ids.length >= 5 && missing.length === 0, missing.join(", "));
 
+// ---- the job flow: status, then the result over GET ----------------------------
+// This is the path the dashboard actually uses. It used to 404 because the result
+// route existed only under POST, and the poll loop then retried forever.
+const started = await json("/api/analyze/start", { symbol: "BBCA.JK", holding_days: 5, ai: false });
+let jobState = { status: "running" };
+for (let attempt = 0; attempt < 120; attempt += 1) {
+  jobState = (await json(`/api/analyze/status?id=${started.payload.id}`)).payload;
+  if (jobState.status !== "running") break;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+check("job: status mencapai complete", jobState.status === "complete", JSON.stringify(jobState));
+const jobResult = await json(`/api/analyze/result?id=${started.payload.id}`);
+check("job: hasil diambil lewat GET",
+  jobResult.status === 200 && jobResult.payload.symbol === "BBCA.JK",
+  `HTTP ${jobResult.status}`);
+
 const journal = await json("/api/journal");
 check("jurnal: entri terbaca", Array.isArray(journal.payload.entries));
 

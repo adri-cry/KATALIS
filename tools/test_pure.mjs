@@ -180,6 +180,24 @@ const hostileStats = ui.statCards({
 check("jurnal: jumlah dan hit rate tepercaya tidak menjadi markup",
   !hostileStats.includes("<script") && hostileStats.includes("tanpa arah"));
 
+// ---- HTTP failures carry their status, so callers never guess from text -------
+// The poll loop used to look for the substring "404" in the message. A 404 whose
+// body said only "unknown endpoint" slipped through and the loop retried forever.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async () => ({
+  ok: false, status: 404, statusText: "Not Found",
+  json: async () => ({ error: "unknown endpoint" }),
+});
+try {
+  let caught = null;
+  try { await ui.api("/api/analyze/result?id=x"); } catch (error) { caught = error; }
+  check("api: kode HTTP tersedia pada galat",
+    caught !== null && caught.status === 404 && caught.message === "unknown endpoint",
+    caught ? `${caught.status} ${caught.message}` : "tidak melempar");
+} finally {
+  globalThis.fetch = realFetch;
+}
+
 // ---- report -----------------------------------------------------------------
 let failed = 0;
 for (const item of checks) {

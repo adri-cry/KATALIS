@@ -281,6 +281,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, target.read_bytes(), types.get(target.suffix, guessed or "application/octet-stream"))
 
     # -- routes -----------------------------------------------------------
+    def _analysis_result(self) -> None:
+        """The finished payload for a job.
+
+        Reachable over GET as well as POST: it only reads, and the dashboard has
+        always fetched it as a plain GET. When it was POST-only that fetch got a
+        404 and the poll loop retried forever.
+        """
+        job_id = self._query().get("id") or ""
+        job = _analysis_job(job_id)
+        if job is None:
+            return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
+        if job["status"] == "error":
+            return self._error(job.get("error") or "analisis gagal", 500)
+        if job["status"] != "complete":
+            return self._json({"status": job["status"], "stage": job["stage"]}, 202)
+        return self._json(job["result"])
+
     def do_GET(self) -> None:                                    # noqa: N802
         route = urllib.parse.urlparse(self.path).path
         try:
@@ -292,6 +309,8 @@ class Handler(BaseHTTPRequestHandler):
                 if job is None:
                     return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
                 return self._json({key: value for key, value in job.items() if key not in ("result", "error")})
+            if route == "/api/analyze/result":
+                return self._analysis_result()
             if route.startswith("/api/analyze/"):
                 return self._error("unknown endpoint", 404)
             if route == "/api/watchlist":
@@ -404,15 +423,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({key: value for key, value in job.items() if key != "result"}, 202)
 
             if route == "/api/analyze/result":
-                job_id = self._query().get("id") or ""
-                job = _analysis_job(job_id)
-                if job is None:
-                    return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
-                if job["status"] == "error":
-                    return self._error(job.get("error") or "analisis gagal", 500)
-                if job["status"] != "complete":
-                    return self._json({"status": job["status"], "stage": job["stage"]}, 202)
-                return self._json(job["result"])
+                return self._analysis_result()
 
             if route == "/api/screen":
                 # Slow by nature: one Yahoo request per ticker, idx lookups for the shortlist,
