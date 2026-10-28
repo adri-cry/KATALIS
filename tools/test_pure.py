@@ -187,6 +187,49 @@ finally:
     desk.idxbridge.run = original_status_run
     desk.idxbridge.binary = original_idx_binary
 
+# ---- IDX bridge error messages -------------------------------------------------
+# A role card has to name the source and the status. Dumping idx's JSON envelope
+# was unreadable, and the 120-character cut clipped "HTTP 502" to "HTTP 50".
+ipot_error = desk.idxbridge.BridgeUnavailable(
+    'idx bandar detect JSMR --period 1w failed: '
+    '{"error":{"code":"provider","message":"ipot: broker summary for JSMR: HTTP 502"},"exit_code":3}')
+check("idx error: IPOT 502 disebut singkat",
+      desk.idxbridge.explain(ipot_error) == "IPOT menolak permintaan (HTTP 502)",
+      desk.idxbridge.explain(ipot_error))
+cloudflare_error = desk.idxbridge.BridgeUnavailable(
+    'idx stocks foreign TMPO --days 20 failed: '
+    '{"error":{"code":"provider","message":"idx: idx.co.id refused the request (Cloudflare bot protection). '
+    'It usually passes from an ordinary home or office connection; data centres, VPNs and CI runners are '
+    'often blocked. Cached copies are still served (try --offline)"},"exit_code":3}')
+check("idx error: penolakan Cloudflare disebut",
+      "Cloudflare" in desk.idxbridge.explain(cloudflare_error),
+      desk.idxbridge.explain(cloudflare_error))
+check("idx error: teks tanpa JSON tetap terbaca",
+      desk.idxbridge.explain(RuntimeError("the idx binary is not installed"))
+      == "the idx binary is not installed")
+
+# The documented retry: the four feeds the desk reads get one more attempt.
+original_wrapped_run = desk.idxbridge.run
+retry_calls: list[dict] = []
+
+
+def record_run(*args, **kwargs):
+    retry_calls.append(kwargs)
+    return {"data": {}}
+
+
+try:
+    desk.idxbridge.run = record_run
+    desk.idxbridge.bandar("BBCA.JK")
+    desk.idxbridge.foreign("BBCA.JK")
+    desk.idxbridge.fundamental("BBCA.JK")
+    desk.idxbridge.sentiment("BBCA.JK")
+    check("idx bridge: empat umpan dewan mencoba ulang sekali",
+          len(retry_calls) == 4 and all(call.get("attempts") == 2 for call in retry_calls),
+          str(retry_calls))
+finally:
+    desk.idxbridge.run = original_wrapped_run
+
 # ---- parallel role reads -----------------------------------------------------
 # All four independent external-role stubs must overlap; results must retain the
 # established flow/bandar/fundamental/news order for downstream rendering.

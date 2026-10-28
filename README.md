@@ -238,7 +238,22 @@ Endpoint `/api/idx?cmd=bandar&symbol=BBCA.JK` juga terbuka untuk data mentahnya
 **Catatan soal penolakan sesekali.** Sebagian endpoint `idx` mengambil data dari
 `idx.co.id`, yang menolak sebagian permintaan secara acak (perilaku ini didokumentasikan
 proyek aslinya). KATALIS mencoba ulang sekali; bila tetap gagal, peran itu jatuh ke proksi
-dan **menuliskan alasannya** di kartu peran — bukan diam-diam menjadi netral.
+dan **menuliskan alasannya** di kartu peran — bukan diam-diam menjadi netral. Alasannya
+diringkas menjadi satu baris, misalnya `IPOT menolak permintaan (HTTP 502)` atau
+`idx.co.id menolak permintaan (Cloudflare)`.
+
+**Kalau IPOT sedang mati.** Bandarmologi (`bandar detect`) dan aksi korporasi diambil dari
+`indopremier.com`. Endpoint itu bisa mengembalikan HTTP 502 untuk **semua** saham sekaligus
+— halaman depannya tetap 200, jadi yang mati adalah backend datanya, bukan koneksi Anda.
+Tidak ada yang bisa diperbaiki dari sisi KATALIS: peran Bandar memakai proksi MFI/OBV
+selama gangguan, dan alasannya terlihat di kartu. Cek cepatnya:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://www.indopremier.com/module/saham/include/data-brokersummary.php?code=BBCA&start=10/20/2026&end=10/27/2026&fd=all&board=all"
+```
+
+`502` berarti sedang gangguan di sana; `200` berarti seharusnya sudah bekerja lagi.
 
 ---
 
@@ -442,7 +457,7 @@ proksi harga, dan kartunya berlabel `proksi`.
 Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
 
 ```bash
-python tools/test_pure.py        # 103 cek backend: indikator, dewan, jurnal, pemindai
+python tools/test_pure.py        # 107 cek backend: indikator, dewan, jurnal, pemindai
 node tools/test_pure.mjs         # 46 cek frontend: ringkasan, simulator, chart, escape
 ```
 

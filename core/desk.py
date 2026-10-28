@@ -197,7 +197,7 @@ def _role_flow(ticker: str, snap: dict) -> dict:
                         f"Aliran {'masuk' if streak > 0 else 'keluar'} {abs(streak)} sesi beruntun.")
                 return _role("flow", "Analis Aliran Asing", score, bull, bear, source="idx")
         except Exception as exc:  # noqa: BLE001 — a broken feed degrades to the proxy, visibly
-            fallback = f"data idx gagal: {str(exc)[:120]}"
+            fallback = f"data idx gagal: {idxbridge.explain(exc)}"
 
     ind = snap["indicators"]
     score, bull, bear = 0.0, [], []
@@ -252,7 +252,7 @@ def _role_bandar(ticker: str, snap: dict) -> dict:
                     return _role("bandar", "Analis Bandar", points, bull, bear,
                                  source="idx", ceiling=1.8)
         except Exception as exc:  # noqa: BLE001
-            fallback = f"data idx gagal: {str(exc)[:120]}"
+            fallback = f"data idx gagal: {idxbridge.explain(exc)}"
 
     ind = snap["indicators"]
     score, bull, bear = 0.0, [], []
@@ -291,7 +291,8 @@ def _role_fundamental(ticker: str) -> dict:
     try:
         data = idxbridge.fundamental(ticker) or {}
     except Exception as exc:  # noqa: BLE001
-        return _missing("fundamental", "Analis Fundamental", f"Data idx tidak terbaca: {exc}")
+        return _missing("fundamental", "Analis Fundamental",
+                        f"Data idx tidak terbaca: {idxbridge.explain(exc)}")
 
     valuation = data.get("valuation") or {}
     profitability = data.get("profitability") or {}
@@ -371,7 +372,7 @@ def _role_news(ticker: str) -> dict:
     try:
         data = idxbridge.sentiment(ticker) or {}
     except Exception as exc:  # noqa: BLE001
-        return _missing("news", "Analis Berita", f"Data idx tidak terbaca: {exc}")
+        return _missing("news", "Analis Berita", f"Data idx tidak terbaca: {idxbridge.explain(exc)}")
 
     items = int(data.get("items") or 0)
     label = str(data.get("label") or "").lower()

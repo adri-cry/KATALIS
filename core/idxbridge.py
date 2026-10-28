@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -133,20 +134,56 @@ def _data(payload: dict):
     return payload.get("data", payload)
 
 
+_ERROR_HTTP = re.compile(r"HTTP (\d{3})")
+
+
+def explain(exc: BaseException) -> str:
+    """A short Indonesian reason for a failed idx call.
+
+    idx prints a JSON envelope on failure and run() folds it into the exception
+    message. Showing that blob on a role card is unreadable, and truncating it
+    cuts the HTTP status in half — yet the source and the status are exactly
+    what tells an operator whether this is a bug or an outage upstream.
+    """
+    raw = str(exc)
+    payload = None
+    start = raw.find("{")
+    if start >= 0:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(raw[start:])
+        except json.JSONDecodeError:
+            payload = None
+    error = (payload or {}).get("error")
+    detail = str((error or {}).get("message") or raw).strip()
+    lowered = detail.lower()
+    if "cloudflare" in lowered or "bot protection" in lowered:
+        return "idx.co.id menolak permintaan (Cloudflare)"
+    status = _ERROR_HTTP.search(detail)
+    if status:
+        who = "IPOT" if "ipot" in lowered else "sumber idx"
+        return f"{who} menolak permintaan (HTTP {status.group(1)})"
+    code = (error or {}).get("code")
+    if code:
+        return f"{code}: {detail[:140]}"
+    return detail[:140]
+
+
 def _symbol(ticker: str) -> str:
     return ticker[:-3] if ticker.upper().endswith(".JK") else ticker.upper()
 
 
+# The four feeds the desk reads get one retry: idx.co.id refuses a share of
+# requests at random, and a single refusal should not demote a role to its proxy.
 def bandar(ticker: str, period: str = "1w") -> dict:
-    return _data(run("bandar", "detect", _symbol(ticker), "--period", period))
+    return _data(run("bandar", "detect", _symbol(ticker), "--period", period, attempts=2))
 
 
 def foreign(ticker: str, days: int = 20) -> dict:
-    return _data(run("stocks", "foreign", _symbol(ticker), "--days", str(days)))
+    return _data(run("stocks", "foreign", _symbol(ticker), "--days", str(days), attempts=2))
 
 
 def fundamental(ticker: str) -> dict:
-    return _data(run("stocks", "fundamental", _symbol(ticker)))
+    return _data(run("stocks", "fundamental", _symbol(ticker), attempts=2))
 
 
 def profile(ticker: str) -> dict:
@@ -166,7 +203,7 @@ def news(ticker: str) -> dict:
 
 
 def sentiment(ticker: str) -> dict:
-    return _data(run("stocks", "sentiment", _symbol(ticker)))
+    return _data(run("stocks", "sentiment", _symbol(ticker), attempts=2))
 
 
 def holidays() -> dict:
