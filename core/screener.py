@@ -3,10 +3,12 @@
 Three stages, cheapest first, so a 40-ticker universe costs one price request per
 ticker, a handful of idx lookups, and exactly one model call:
 
-1. **Gate (code).** One Yahoo snapshot per ticker. Anything illiquid, wildly
-   volatile, too young, too cheap, or stale is rejected with its reason written
-   down. Survivors are ranked by the desk's technical role and the best
-   ``shortlist`` move on.
+1. **Gate (code).** One Yahoo snapshot per ticker. Since 2026-11-03 the
+   layer-1 gate only rejects stale data, sub-Rp1 prices, and listings younger
+   than 20 sessions; turnover and ATR are recorded, not rejected (the layer-2
+   system gates decide those). Survivors are ranked by the desk's technical
+   role and the best ``shortlist`` move on, plus the day's 5 top gainers,
+   which always move on.
 2. **Desk (code).** The full five-role ``desk.analyse`` runs only on that
    shortlist (this is where the slow idx lookups happen). Anything the desk does
    not rate Buy or Overweight is rejected, again with its reason.
@@ -47,11 +49,13 @@ MAX_UNIVERSE = 120                     # a runaway request must not hammer Yahoo
 class Gate:
     """Hard limits. A stock that fails any of them is not a candidate, whatever its score."""
 
-    min_turnover: float = 1e9          # rupiah traded per day (20-session average volume x price)
-    min_price: float = 100.0           # below this the tick is a large share of the price
-    max_atr_pct: float = 7.0           # average daily range; above this it behaves like a "gorengan"
-    min_sessions: int = 120            # a young listing has no trend worth reading
-    max_stale_days: int = 7            # last bar older than this = suspended or feed problem
+    # Gerbang lapis 1 diubah 2026-11-03 (Adri): lapis 1 tidak lagi membuang saham
+    # diam-diam. Yang menentukan layak SISTEM tetap gerbang sistem (lapis 2) dan sizing.
+    min_turnover: float = 0.0          # floor dihapus: nilai tetap dicatat di analisis; gerbang sistem Rp500jt yang menentukan
+    min_price: float = 1.0             # dari Rp100: supaya saham receh ikut ke-scan
+    max_atr_pct: float = 9999.0        # praktis tanpa cap di lapis 1; gerbang sistem ATR 7% tetap berlaku untuk SISTEM
+    min_sessions: int = 20             # dari 120: batas teknis minimal supaya SMA20/ATR/vol_ratio bisa dihitung
+    max_stale_days: int = 7            # tidak diubah: data basi >7 hari = suspensi/delisting, tidak ada yang bisa dianalisis
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +332,7 @@ def _row(analysis: dict, verdict: dict | None, pick: bool) -> dict:
     }
 
 
-def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: int = 15,
+def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: int = 30,
            max_candidates: int = 8, ai: bool | None = None, record: bool = False,
            holding_days: int = 5, range_: str = "1y", gate: Gate | None = None,
            today: date | None = None, workers: int = 4) -> dict:
@@ -350,11 +354,19 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
 
     # -- stage 1: price snapshot and the gate -------------------------------
     passed: list[tuple[str, float]] = []
+    day_change: dict[str, float] = {}   # semua simbol yang snapshot-nya segar, apa pun hasil gerbangnya
+    fresh: set[str] = set()
     for symbol, snap, error in _in_pool(lambda s: market.snapshot(s, range_), universe, workers):
         if error:
             errors.append({"symbol": symbol, "error": error})
             continue
-        reasons = gate_reasons(snap["indicators"], _last_session(snap), today, gate)
+        last_session = _last_session(snap)
+        if (today - last_session).days <= gate.max_stale_days:
+            fresh.add(symbol)
+            bars = snap.get("bars") or []
+            if len(bars) >= 2 and bars[-2].get("c"):
+                day_change[symbol] = (bars[-1]["c"] / bars[-2]["c"] - 1) * 100
+        reasons = gate_reasons(snap["indicators"], last_session, today, gate)
         if reasons:
             rejected.append({"symbol": symbol, "stage": "gerbang", "reasons": reasons})
             continue
@@ -369,6 +381,18 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
         rejected.append({"symbol": symbol, "stage": "shortlist",
                          "reasons": [f"skor teknikal {score:+.2f} di luar {shortlist} teratas"]})
     short = [symbol for symbol, _ in passed[:shortlist]]
+    # -- slot wajib top gainers (2026-11-03, lapis 1): 5 top gainers hari itu
+    #    masuk analisis penuh di luar ranking teknikal, supaya tidak hilang
+    #    diam-diam seperti 2026-11-03 (TMPO/AIMS/BSWD/BLTZ tidak masuk pool).
+    #    Mereka tetap disaring tahap 2 (rating mesin) dan gerbang sistem;
+    #    slot ini hanya menjamin mereka dinilai dan tercatat.
+    forced: list[dict] = []
+    for symbol, change in sorted(day_change.items(), key=lambda kv: kv[1], reverse=True)[:5]:
+        if symbol in fresh and symbol not in short:
+            rejected[:] = [r for r in rejected if r["symbol"] != symbol]
+            short.append(symbol)
+            forced.append({"symbol": symbol, "change_pct": round(change, 2),
+                           "alasan": "top gainer hari itu (slot wajib lapis 1)"})
 
     # -- stage 2: the full desk, only for the shortlist ----------------------
     analyses: list[dict] = []
@@ -431,6 +455,7 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
         "picks_source": picks_source,
         "market_note": market_note,
         "rejected": rejected,
+        "forced": forced,
         "errors": errors,
         "ai": ai_info,
         "recorded": recorded,
@@ -492,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
                                      description="Cari saham IDX yang layak dibeli dari sebuah universe.")
     parser.add_argument("symbols", nargs="*", help="kode saham; kosong = data/universe.txt, lalu watchlist")
     parser.add_argument("--top", type=int, default=5, help="maksimal pilihan (default 5)")
-    parser.add_argument("--shortlist", type=int, default=15, help="berapa saham lolos ke analisis penuh")
+    parser.add_argument("--shortlist", type=int, default=30, help="berapa saham lolos ke analisis penuh")
     parser.add_argument("--no-ai", action="store_true", help="urutan mesin saja, tanpa panggilan model")
     parser.add_argument("--record", action="store_true", help="catat pilihan ke jurnal untuk dinilai nanti")
     parser.add_argument("--json", action="store_true", help="cetak hasil lengkap sebagai JSON")
