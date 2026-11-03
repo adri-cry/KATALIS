@@ -434,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(screener.screen(
                     [str(s) for s in symbols] or None,
                     max_picks=int(body.get("max_picks") or 5),
-                    shortlist=int(body.get("shortlist") or 15),
+                    shortlist=int(body.get("shortlist") or 30),
                     ai=body.get("ai"),
                     record=bool(body.get("record")),
                     holding_days=int(body.get("holding_days") or 5),
@@ -549,14 +549,17 @@ def main() -> None:
 
     store.init()
     desired = 8770
+    host = "127.0.0.1"
     for index, arg in enumerate(sys.argv):
         if arg == "--port" and index + 1 < len(sys.argv):
             desired = int(sys.argv[index + 1])
+        if arg == "--host" and index + 1 < len(sys.argv):
+            host = sys.argv[index + 1]
 
     server = None
     for offset in range(0, 20):
         try:
-            server = Server(("127.0.0.1", desired + offset), Handler)
+            server = Server((host, desired + offset), Handler)
             break
         except OSError:
             continue
@@ -571,7 +574,7 @@ def main() -> None:
     print("")
     print(f"  KATALIS {VERSION}  |  IDX Intelligence Desk")
     print("  " + "-" * 52)
-    print(f"  dashboard  http://127.0.0.1:{port}")
+    print(f"  dashboard  http://{host}:{port}")
     print(f"  data       Yahoo Finance | benchmark IHSG ({market.BENCHMARK})")
     print(f"  idx CLI    {bridge['version'] if bridge['available'] else 'belum terpasang (peran idx memakai proksi harga)'}")
     print(f"  AI         {brain['model'] if brain['configured'] else 'mati (isi OPENAI_API_KEY di .env)'}")
