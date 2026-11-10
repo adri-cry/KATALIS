@@ -103,7 +103,7 @@ Sudah:
 - UI: fallback server lama memakai status 404, bukan teks pesan; tab punya
   `aria-controls`/`aria-labelledby`; watchlist tidak direbuild bila markup sama; poll
   berhenti saat tab tersembunyi.
-- Verifikasi: `tools/test_pure.py` 122/122, `tools/test_pure.mjs` 50/50, plus probe
+- Verifikasi: `tools/test_pure.py` 123/123, `tools/test_pure.mjs` 50/50, plus probe
   HTTP langsung (400/403/413/415, traversal 404, SSE/tick/benchmark).
 
 ## Batas yang diketahui
