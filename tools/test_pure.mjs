@@ -27,6 +27,14 @@ check("format: persen negatif", ui.pct(-2.25) === "-2,25%", ui.pct(-2.25));
 check("escape: tag HTML dinetralkan", ui.esc("<b>x</b>") === "&lt;b&gt;x&lt;/b&gt;");
 check("escape: tanda kutip aman", ui.esc('a"b') === "a&quot;b");
 
+// ---- ticker validation ------------------------------------------------------
+check("simbol: empat huruf menjadi listing IDX", ui.normaliseSymbol("bbca") === "BBCA.JK");
+check("simbol: IHSG menjadi kode Yahoo", ui.normaliseSymbol("ihsg") === "IHSG.JK");
+check("simbol: kode pendek/panjang ditolak dengan alasan",
+      ui.symbolProblem("ABC") !== "" && ui.symbolProblem("ABCDE") !== "");
+check("simbol: kode empat huruf dan akhiran eksplisit diterima",
+      ui.symbolProblem("BBCA.JK") === "" && ui.symbolProblem("BTC-USD") === "");
+
 // ---- chart ------------------------------------------------------------------
 const bars = Array.from({ length: 40 }, (_, i) => ({
   t: 1792000000 + i * 86400,

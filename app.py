@@ -29,6 +29,36 @@ ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 VERSION = "1.2.0"
 WIB = timezone(timedelta(hours=7))
+MAX_BODY_BYTES = 1_000_000
+# Host names the dashboard may be reached under. ``--host`` adds the bind name;
+# a wildcard bind disables the check because there is no single name to compare.
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+_ALLOW_ANY_HOST = False
+
+
+class BadRequest(ValueError):
+    """A user input problem whose message is safe to show in the dashboard."""
+
+
+def _requested_symbol(raw) -> str:
+    """Normalise a ticker from the user, rejecting an ambiguous bare code.
+
+    Four letters are IDX listings; anything with an explicit suffix (BBCA.JK,
+    BTC-USD) is passed through. A bare 1-6 letter code such as "ABC" would
+    silently resolve to a foreign listing this desk is not built for.
+    """
+    value = str(raw or "").strip().upper()
+    if not value:
+        return ""
+    if value == "IHSG":
+        return market.BENCHMARK
+    if value.isalpha() and len(value) != 4:
+        raise BadRequest(
+            f"kode IDX harus empat huruf (mis. BBCA), bukan '{value}'; "
+            "untuk simbol lain sertakan akhiran, mis. BTC-USD"
+        )
+    return market.normalise(value)
+
 
 _ANALYSIS_LOCK = threading.Lock()
 _ANALYSIS_JOBS: dict[str, dict] = {}
@@ -69,23 +99,31 @@ def _analysis_job(job_id: str, *, updates: dict | None = None) -> dict | None:
 
 
 def quotes(symbols: list[str]) -> list[dict]:
-    """Quote rows for the watchlist, with a 30-session sparkline for the card."""
-    rows = []
-    for symbol in symbols:
+    """Quote rows for the watchlist, with a 30-session sparkline for the card.
+
+    One request per symbol, but fetched together: on a cold cache a watchlist of
+    eight used to take eight sequential round-trips before the card painted.
+    """
+    if not symbols:
+        return []
+
+    def one(symbol: str) -> dict:
         try:
             payload = market.chart(symbol, "1mo")
             indicators = market.indicators(payload["bars"])
-            rows.append({
+            return {
                 "symbol": payload["symbol"],
                 "name": payload["name"],
                 "price": payload["price"],
                 "change_pct": indicators["change_pct"],
                 "rsi14": indicators["rsi14"],
                 "spark": [round(bar["c"], 2) for bar in payload["bars"][-30:]],
-            })
+            }
         except market.MarketError as exc:
-            rows.append({"symbol": symbol, "error": str(exc)})
-    return rows
+            return {"symbol": symbol, "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+        return list(pool.map(one, symbols))
 
 
 def _price_of(symbol: str, fallback: float) -> float:
@@ -208,12 +246,16 @@ def _background_analysis(job_id: str, symbol: str, holding: int, range_: str,
 
 
 def health() -> dict:
+    diagnostics = llm.diagnose()
+    # The diagnostics name the .env file by absolute path; the dashboard never
+    # needs that, and /api/health is reachable from the page itself.
+    diagnostics.pop("env_file", None)
     return {
         "ok": True,
         "version": VERSION,
         "benchmark": market.BENCHMARK,
         "idx": idxbridge.status(),
-        "llm": {**llm.status(), "diagnostics": llm.diagnose()},
+        "llm": {**llm.status(), "diagnostics": diagnostics},
         "journal": store.stats(),
         "equity": portfolio_view()["equity"],
         "clock": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB"),
@@ -257,14 +299,59 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, message: str, code: int = 400) -> None:
         self._json({"error": message}, code)
 
-    def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
+    def _host_ok(self) -> bool:
+        """Reject a Host header this server was not asked to answer (DNS rebinding)."""
+        if _ALLOW_ANY_HOST:
+            return True
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return True
+        if host.startswith("["):
+            name = host.split("]")[0] + "]"
+        else:
+            name = host.rsplit(":", 1)[0]
+        return name in _ALLOWED_HOSTS
+
+    def _same_origin(self) -> bool:
+        """Refuse a write triggered by another site (a no-cors form POST)."""
+        origin = (self.headers.get("Origin") or "").strip().lower().rstrip("/")
+        if not origin:
+            return True
+        host = (self.headers.get("Host") or "").strip().lower()
+        return bool(host) and origin in (f"http://{host}", f"https://{host}")
+
+    def _reject(self, message: str, code: int) -> None:
+        # The body may still be unread; close instead of desyncing keep-alive.
+        self.close_connection = True
+        self._error(message, code)
+
+    def _body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._reject("Content-Length tidak valid", 400)
+            return None
+        if length < 0:
+            self._reject("Content-Length tidak valid", 400)
+            return None
+        if length > MAX_BODY_BYTES:
+            self._reject("payload terlalu besar (maksimal 1 MB)", 413)
+            return None
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if length and ctype != "application/json":
+            self._reject("Content-Type harus application/json", 415)
+            return None
         if not length:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return {}
+            self._reject("body bukan JSON yang valid", 400)
+            return None
+        if not isinstance(payload, dict):
+            self._reject("body harus berupa objek JSON", 400)
+            return None
+        return payload
 
     def _query(self) -> dict:
         parsed = urllib.parse.urlparse(self.path)
@@ -272,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _static(self, route: str) -> None:
         target = (WEB / (route.lstrip("/") or "index.html")).resolve()
-        if not str(target).startswith(str(WEB.resolve())) or not target.is_file():
+        if not target.is_relative_to(WEB.resolve()) or not target.is_file():
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
         guessed, _ = mimetypes.guess_type(str(target))
@@ -299,6 +386,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(job["result"])
 
     def do_GET(self) -> None:                                    # noqa: N802
+        if not self._host_ok():
+            return self._reject("Host tidak dikenal", 403)
         route = urllib.parse.urlparse(self.path).path
         try:
             if route == "/api/health":
@@ -317,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
                 symbols = store.watchlist()
                 return self._json({"symbols": symbols, "quotes": quotes(symbols)})
             if route == "/api/market":
-                symbol = market.normalise(self._query().get("symbol") or "")
+                symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 payload = market.snapshot(
@@ -327,12 +416,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self._json(payload)
             if route == "/api/tick":
-                symbol = market.normalise(self._query().get("symbol") or "")
+                symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 return self._json(market.tick(symbol))
             if route == "/api/stream":
-                symbol = market.normalise(self._query().get("symbol") or "")
+                symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 return self._stream(symbol)
@@ -342,7 +431,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/journal":
                 return self._json({"entries": store.journal(), "stats": store.stats()})
             if route == "/api/decision/snapshot":
-                symbol = market.normalise(self._query().get("symbol") or "")
+                symbol = _requested_symbol(self._query().get("symbol") or "")
                 with _ANALYSIS_LOCK:
                     analysis = _LATEST_ANALYSES.get(symbol)
                 if not analysis:
@@ -369,29 +458,44 @@ class Handler(BaseHTTPRequestHandler):
             if route.startswith("/api/"):
                 return self._error("unknown endpoint", 404)
             return self._static(route)
+        except BadRequest as exc:
+            return self._error(str(exc), 400)
         except market.MarketError as exc:
             return self._error(str(exc), 502)
-        except Exception as exc:                                  # noqa: BLE001
+        except ValueError:
+            return self._error("nilai tidak valid pada permintaan", 400)
+        except Exception:                                          # noqa: BLE001
             if os.environ.get("KATALIS_LOG"):
                 traceback.print_exc()
-            return self._error(f"{type(exc).__name__}: {exc}", 500)
+            return self._error("terjadi kesalahan internal di server; "
+                               "jalankan dengan KATALIS_LOG=1 untuk detail", 500)
 
     def do_POST(self) -> None:                                   # noqa: N802
+        if not self._host_ok():
+            return self._reject("Host tidak dikenal", 403)
+        if not self._same_origin():
+            return self._reject("Origin tidak dikenal", 403)
         route = urllib.parse.urlparse(self.path).path
         body = self._body()
+        if body is None:
+            return
         try:
             if route == "/api/watchlist":
                 if body.get("remove"):
-                    return self._json({"symbols": store.remove_watch(str(body["remove"]))})
+                    return self._json({"symbols": store.remove_watch(
+                        _requested_symbol(str(body["remove"])))})
                 incoming = body.get("add") or body.get("symbols") or []
                 if isinstance(incoming, str):
                     incoming = [incoming]
                 if not incoming:
                     return self._error("add at least one symbol")
-                return self._json({"symbols": store.add_watch([str(s) for s in incoming])})
+                symbols = [s for s in (_requested_symbol(item) for item in incoming) if s]
+                if not symbols:
+                    return self._error("add at least one symbol")
+                return self._json({"symbols": store.add_watch(symbols)})
 
             if route == "/api/analyze":
-                symbol = market.normalise(body.get("symbol") or "")
+                symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 holding = int(body.get("holding_days") or 5)
@@ -402,7 +506,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(analysis)
 
             if route == "/api/analyze/start":
-                symbol = market.normalise(body.get("symbol") or "")
+                symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 job_id = uuid.uuid4().hex
@@ -431,17 +535,20 @@ class Handler(BaseHTTPRequestHandler):
                 symbols = body.get("symbols") or []
                 if isinstance(symbols, str):
                     symbols = [symbols]
+                symbols = [_requested_symbol(str(item)) for item in symbols]
                 return self._json(screener.screen(
-                    [str(s) for s in symbols] or None,
+                    symbols or None,
                     max_picks=int(body.get("max_picks") or 5),
                     shortlist=int(body.get("shortlist") or 30),
+                    max_candidates=int(body.get("max_candidates") or 8),
                     ai=body.get("ai"),
                     record=bool(body.get("record")),
                     holding_days=int(body.get("holding_days") or 5),
                 ))
 
             if route == "/api/simulate":
-                code, result = simulate_latest(body.get("symbol") or "", body.get("analysis_id") or "",
+                code, result = simulate_latest(_requested_symbol(body.get("symbol") or ""),
+                                               body.get("analysis_id") or "",
                                                body.get("lots"), body.get("capital"),
                                                body.get("fee_rate_pct"))
                 return self._json(result, code)
@@ -450,7 +557,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(journal.settle_all(body.get("holding_days")))
 
             if route == "/api/portfolio":
-                symbol = market.normalise(body.get("symbol") or "")
+                symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
                     return self._error("symbol is required")
                 quantity = float(body.get("quantity") or 0)
@@ -463,14 +570,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(portfolio_view())
 
             return self._error("unknown endpoint", 404)
+        except BadRequest as exc:
+            return self._error(str(exc), 400)
         except market.MarketError as exc:
             return self._error(str(exc), 502)
-        except ValueError as exc:
-            return self._error(f"nilai tidak valid: {exc}", 400)
-        except Exception as exc:                                  # noqa: BLE001
+        except ValueError:
+            return self._error("nilai tidak valid pada permintaan", 400)
+        except Exception:                                          # noqa: BLE001
             if os.environ.get("KATALIS_LOG"):
                 traceback.print_exc()
-            return self._error(f"{type(exc).__name__}: {exc}", 500)
+            return self._error("terjadi kesalahan internal di server; "
+                               "jalankan dengan KATALIS_LOG=1 untuk detail", 500)
 
     def _stream(self, symbol: str) -> None:
         """Server-sent events: one tick every few seconds until the client leaves.
@@ -539,6 +649,7 @@ class Server(ThreadingHTTPServer):
 
 
 def main() -> None:
+    global _ALLOW_ANY_HOST
     # Windows consoles default to cp1252, where the banner's box-drawing
     # characters raise UnicodeEncodeError before the server ever starts.
     for stream in (sys.stdout, sys.stderr):
@@ -555,6 +666,11 @@ def main() -> None:
             desired = int(sys.argv[index + 1])
         if arg == "--host" and index + 1 < len(sys.argv):
             host = sys.argv[index + 1]
+
+    if host in ("0.0.0.0", "::", "[::]"):
+        _ALLOW_ANY_HOST = True
+    else:
+        _ALLOWED_HOSTS.add(host.strip("[]").lower())
 
     server = None
     for offset in range(0, 20):

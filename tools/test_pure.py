@@ -82,6 +82,31 @@ short = market.indicators(bars_from([100, 101, 102]))
 check("indikator: seri pendek memberi None, bukan angka palsu",
       short["sma20"] is None and short["rsi14"] is None, str(short["sma20"]))
 
+# Wilder's smoothing remembers an old shock; a simple 14-bar average forgets it
+# as soon as it rolls out of the window, so this flat-after-crash series stays low.
+shock = [100.0] * 40 + [50.0] + [50.0 + (0.2 if i % 2 else 0) for i in range(1, 40)]
+check("indikator: RSI Wilder mengingat guncangan lama", (market.indicators(bars_from(shock))["rsi14"] or 100) < 35,
+      str(market.indicators(bars_from(shock))["rsi14"]))
+
+# A crash outside the last 126 bars is still the largest drawdown in the series.
+crash_early = ([100.0] * 40 + [100.0 - 1.5 * i for i in range(1, 41)]
+               + [40.0 + 0.6 * i for i in range(1, 141)])
+mdd = market.indicators(bars_from(crash_early))["max_drawdown_pct"]
+check("indikator: drawdown terburuk mencakup seluruh riwayat", (mdd or 0) <= -55, str(mdd))
+
+# Intraday series: yesterday's close, not the bar five minutes ago.
+base = datetime(2026, 7, 8, 2, 0, tzinfo=timezone.utc)      # 09:00 WIB
+intraday = [{"t": int((base + timedelta(minutes=5 * i)).timestamp()),
+             "o": c, "h": c, "l": c, "c": c, "v": 1.0}
+            for i, c in enumerate([100.0, 101.0])]
+intraday += [{"t": int((base + timedelta(days=1, minutes=5 * i)).timestamp()),
+              "o": c, "h": c, "l": c, "c": c, "v": 1.0}
+             for i, c in enumerate([110.0, 111.0])]
+check("harga: prev_close intraday = close sesi sebelumnya",
+      market._previous_close(intraday, "5m") == 101.0, str(market._previous_close(intraday, "5m")))
+check("harga: prev_close harian tetap bar sebelumnya",
+      market._previous_close(bars_from([1.0, 2.0, 3.0]), "1d") == 2.0)
+
 # ---- durable-in-process analysis job registry --------------------------------
 app_module._ANALYSIS_JOBS.clear()
 app_module._ANALYSIS_JOBS["unit-job"] = {"id": "unit-job", "status": "running", "stage": "ai",
@@ -95,6 +120,17 @@ check("job analisis: worker dapat memperbarui stage dan status selesai",
       and app_module._analysis_job("unit-job")["status"] == "complete")
 app_module._ANALYSIS_JOBS.clear()
 
+# ---- ticker input validation -------------------------------------------------
+check("simbol: empat huruf menjadi listing IDX", app_module._requested_symbol("bbca") == "BBCA.JK")
+check("simbol: IHSG dipetakan ke benchmark", app_module._requested_symbol("IHSG") == market.BENCHMARK)
+check("simbol: akhiran eksplisit diteruskan", app_module._requested_symbol("btc-usd") == "BTC-USD")
+rejected = False
+try:
+    app_module._requested_symbol("ABC")
+except app_module.BadRequest:
+    rejected = True
+check("simbol: kode ambigu 3/5 huruf ditolak, bukan dikirim ke pasar lain", rejected)
+
 # ---- IDX tick rounding ------------------------------------------------------
 check("tick: di bawah 200 -> 1", desk._tick(150) == 1)
 check("tick: 200-500 -> 2", desk._tick(400) == 2)
@@ -105,11 +141,16 @@ check("tick: pembulatan ke level sah", desk._round_tick(5023) == 5025, str(desk.
 check("tick: pembulatan ke bawah", desk._round_tick(5012) == 5000, str(desk._round_tick(5012)))
 
 # ---- rating thresholds ------------------------------------------------------
-cases = [(1.2, "Buy"), (0.5, "Overweight"), (0.0, "Hold"),
-         (-0.5, "Underweight"), (-1.4, "Sell")]
+cases = [(1.2, "Buy"), (0.9, "Buy"), (0.5, "Overweight"), (0.3, "Overweight"),
+         (0.0, "Hold"), (-0.3, "Hold"), (-0.5, "Underweight"), (-0.9, "Underweight"),
+         (-1.4, "Sell")]
 for composite, expected in cases:
     check(f"rating: {composite:+.1f} -> {expected}", desk._rating(composite) == expected,
           desk._rating(composite))
+
+# The documented table is inclusive at every boundary; a strictly-greater check
+# would turn the exact -0,3 into Underweight.
+check("rating: batas tabel README inklusif", desk._rating(-0.3) == "Hold" and desk._rating(-0.9) == "Underweight")
 
 # ---- role weighting ---------------------------------------------------------
 analysis_roles = [
@@ -124,6 +165,11 @@ check("keyakinan: berada di 0..1", 0.25 <= confidence <= 0.95, str(confidence))
 check("keyakinan: peran tanpa data menurunkan keyakinan",
       desk._confidence(0.2, analysis_roles) < desk._confidence(0.2, [
           {**role, "available": True} for role in analysis_roles]) + 0.31)
+five_roles = [{**role, "available": True, "score": 0.0} for role in analysis_roles]
+check("keyakinan: sinyal kuat tidak mentok di 0,95",
+      desk._confidence(2.0, five_roles) < 0.95
+      and desk._confidence(1.5, five_roles) > desk._confidence(0.3, five_roles),
+      str(desk._confidence(2.0, five_roles)))
 
 check("bobot: jumlah bobot peran = 1", abs(sum(desk._WEIGHTS.values()) - 1) < 1e-9)
 check("bobot: lima peran dikenal", set(desk._WEIGHTS) == {"market", "flow", "bandar", "fundamental", "news"})
@@ -331,6 +377,8 @@ def guidance_fixture(machine="Buy", ai="Buy", technical=1.0, available=5, sessio
 g = guidance.build(guidance_fixture())
 check("ringkasan: arah selaras -> Beli dan menamai mesin/AI", g["action"] == "Beli" and g["status"] == "selaras")
 check("ringkasan: confidence diberi label heuristik, bukan probabilitas", "bukan probabilitas" in g["machine_confidence_note"])
+check("ringkasan: simulasi ganda sudah dihapus dari guidance",
+      not hasattr(guidance, "simulate"))
 check("ringkasan: source/proxy quality disclosed", "Analis Teknikal" in g["data_quality"]["proxy_roles"])
 
 g_conflict = guidance.build(guidance_fixture(machine="Buy", ai="Sell", technical=1.0))
@@ -498,10 +546,17 @@ check("gerbang: nilai transaksi tipis ditolak",
 check("gerbang: data basi ditolak",
       any("tertinggal" in r for r in
           screener.gate_reasons(ind_ok, date(2026, 6, 1), TODAY, screener.Gate())))
-check("gerbang: riwayat pendek ditolak",
+check("gerbang: riwayat di bawah 20 sesi ditolak",
       any("riwayat" in r for r in
-          screener.gate_reasons(market.indicators(SCREEN_TABLE["UPAA.JK"][-40:]),
+          screener.gate_reasons(market.indicators(SCREEN_TABLE["UPAA.JK"][-15:]),
                                 last_day, TODAY, screener.Gate())))
+# Since 2026-11-03 layer 1 records turnover/ATR instead of rejecting them; the
+# system gate (desk rating + sizing) decides. Keep that contract under test.
+check("gerbang: harga receh dan volume tipis dicatat, bukan ditolak",
+      screener.gate_reasons(market.indicators(SCREEN_TABLE["THIN.JK"]), last_day, TODAY,
+                            screener.Gate()) == []
+      and screener.gate_reasons(market.indicators(SCREEN_TABLE["CHEP.JK"]), last_day, TODAY,
+                                screener.Gate()) == [])
 
 with tempfile.TemporaryDirectory() as tmp:
     universe_file = Path(tmp) / "universe.txt"
@@ -538,11 +593,16 @@ try:
     res = screener.screen(SCREEN_UNIVERSE, ai=False, today=TODAY)
     stages = {item["symbol"]: item["stage"] for item in res["rejected"]}
     candidates = [row["symbol"] for row in res["candidates"]]
+    # Layer 1 keeps cheap and thin names on purpose (2026-11-03); both are rated
+    # Overweight by the synthetic uptrend, so they appear alongside the two
+    # blue chips. The order is composite-then-stable, hence THIN before CHEP.
+    machine_order = ["UPAA.JK", "THIN.JK", "CHEP.JK", "UPBB.JK"]
     check("pemindai: pilihan mesin berurutan menurut komposit",
-          res["picks"] == ["UPAA.JK", "UPBB.JK"] and res["picks_source"] == "mesin", str(res["picks"]))
+          res["picks"] == machine_order and res["picks_source"] == "mesin", str(res["picks"]))
     check("pemindai: downtrend ditolak di tahap teknikal", stages.get("DOWN.JK") == "teknikal", str(stages))
-    check("pemindai: ilikuid, murah, dan basi ditolak di gerbang",
-          all(stages.get(s) == "gerbang" for s in ("THIN.JK", "CHEP.JK", "OLD.JK")), str(stages))
+    check("pemindai: data basi ditolak di gerbang, receh/tipis tetap dianalisis",
+          stages.get("OLD.JK") == "gerbang" and "THIN.JK" in candidates and "CHEP.JK" in candidates,
+          str(stages))
     check("pemindai: saham tanpa data tercatat sebagai galat, bukan hilang",
           [e["symbol"] for e in res["errors"]] == ["NONE.JK"], str(res["errors"]))
     accounted = candidates + list(stages) + [e["symbol"] for e in res["errors"]]
@@ -586,9 +646,11 @@ try:
     check("model: bukti yang dikirim tanpa array bar", '"bars"' not in calls[0] and "UPAA.JK" in calls[0])
     check("model: pilihan = jawaban model yang lolos validasi",
           res["picks"] == ["UPBB.JK"] and res["picks_source"] == "model", str(res["picks"]))
+    rows = {row["symbol"]: row for row in res["candidates"]}
     check("model: kandidat yang ditolak model tetap tampil dengan vonisnya",
-          [(r["symbol"], r["pick"]) for r in res["candidates"]] == [("UPBB.JK", True), ("UPAA.JK", False)]
-          and res["candidates"][1]["ai"]["rating"] == "Hold")
+          rows["UPBB.JK"]["pick"] is True and rows["UPAA.JK"]["pick"] is False
+          and rows["UPAA.JK"]["ai"]["rating"] == "Hold"
+          and rows["THIN.JK"]["ai"] is None, str(rows["UPAA.JK"]))
     check("model: kode karangan dilaporkan", res["ai"]["dropped"] == ["GHOST.JK"], str(res["ai"]))
 
     # the model fails: the desk's ordering stands and the reason is visible
@@ -598,7 +660,7 @@ try:
     llm.chat_json = broken_chat
     res = screener.screen(SCREEN_UNIVERSE, today=TODAY)
     check("model gagal: kembali ke urutan mesin dengan alasan terlihat",
-          res["picks_source"] == "mesin" and res["picks"] == ["UPAA.JK", "UPBB.JK"]
+          res["picks_source"] == "mesin" and res["picks"] == machine_order
           and res["ai"]["error"] == "kunci salah" and not res["ai"]["used"], str(res["ai"]))
 
     # nothing to read: the model is not called at all

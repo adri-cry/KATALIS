@@ -101,15 +101,15 @@
 </main>
 
 <nav class="tabs" id="tabs" role="tablist">
-  <button data-tab="roles" class="on" role="tab" aria-selected="true">Dewan Analis</button>
-  <button data-tab="advice" role="tab">Nasihat AI</button>
-  <button data-tab="debate" role="tab">Debat</button>
-  <button data-tab="risk" role="tab">Risiko</button>
-  <button data-tab="screener" role="tab">Pemindai</button>
-  <button data-tab="journal" role="tab">Jurnal</button>
-  <button data-tab="portfolio" role="tab">Portofolio</button>
+  <button id="tab-roles" data-tab="roles" class="on" role="tab" aria-selected="true" aria-controls="panel">Dewan Analis</button>
+  <button id="tab-advice" data-tab="advice" role="tab" aria-selected="false" aria-controls="panel">Nasihat AI</button>
+  <button id="tab-debate" data-tab="debate" role="tab" aria-selected="false" aria-controls="panel">Debat</button>
+  <button id="tab-risk" data-tab="risk" role="tab" aria-selected="false" aria-controls="panel">Risiko</button>
+  <button id="tab-screener" data-tab="screener" role="tab" aria-selected="false" aria-controls="panel">Pemindai</button>
+  <button id="tab-journal" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel">Jurnal</button>
+  <button id="tab-portfolio" data-tab="portfolio" role="tab" aria-selected="false" aria-controls="panel">Portofolio</button>
 </nav>
-<section class="panel" id="panel" role="tabpanel" tabindex="0">
+<section class="panel" id="panel" role="tabpanel" tabindex="0" aria-labelledby="tab-roles">
   <p class="muted pad">Jalankan analisis untuk melihat dewan analis bekerja.</p>
 </section>
 

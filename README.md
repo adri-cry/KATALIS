@@ -46,7 +46,9 @@ cd katalis
 
 **Cara manual:** `py app.py` di Windows, `python3 app.py` di Linux/macOS.
 
-Buka **http://127.0.0.1:8770**.
+Buka **http://127.0.0.1:8770**. Untuk mengakses dari perangkat lain di jaringan lokal,
+jalankan `py app.py --host 0.0.0.0` (atau alamat LAN mesin ini); tanpa `--host` server
+hanya mendengarkan `127.0.0.1`.
 
 ### Kalau muncul "Python was not found" padahal Python sudah terpasang
 
@@ -92,6 +94,11 @@ Dua centangan di bawah kotak pencarian tersimpan di browser:
 
 - **pakai AI** — matikan untuk menjalankan dewan analis tanpa model sama sekali.
 - **otomatis saat dibuka** — mati secara default, supaya refresh tidak menagih.
+
+Kotak pencarian menerima kode IDX empat huruf (`BBCA`, otomatis menjadi `BBCA.JK`),
+`IHSG`, atau simbol Yahoo dengan akhiran eksplisit (`BTC-USD`). Kode pendek/panjang
+tanpa akhiran ditolak dengan penjelasan, supaya `ABC` tidak diam-diam menjadi saham
+pasar lain.
 
 ---
 
@@ -324,7 +331,7 @@ hanya untuk shortlist, dan **satu** panggilan model untuk semuanya:
 
 | Tahap | Dikerjakan | Yang ditolak |
 |---|---|---|
-| 1. Gerbang | kode | nilai transaksi harian < Rp1 miliar, harga < Rp100, ATR > 7%, riwayat < 120 sesi, data terakhir > 7 hari lalu, lalu skor teknikal ≤ 0. Sisanya diurutkan; `shortlist` teratas (default 15) lanjut |
+| 1. Gerbang | kode | data terakhir > 7 hari lalu, harga < Rp1, riwayat < 20 sesi, lalu skor teknikal ≤ 0. Nilai transaksi dan ATR dicatat tetapi tidak lagi menolak di tahap ini (gerbang sistem di tahap 2 yang menentukan); 5 top gainer hari itu selalu dilanjutkan. Sisanya diurutkan; `shortlist` teratas (default 30) lanjut |
 | 2. Dewan | kode (`desk.analyse`) | rating mesin di bawah Overweight |
 | 3. Model | satu panggilan | kandidat yang diturunkan model ke Hold atau lebih rendah; model boleh mengembalikan **nol** pilihan |
 
@@ -359,7 +366,7 @@ Batas yang perlu diketahui:
 
 | Endpoint | Guna |
 |---|---|
-| `POST /api/screen` | `{"symbols": [], "max_picks": 5, "shortlist": 15, "ai": null, "record": false}` → kandidat, pilihan, saham yang ditolak beserta alasannya |
+| `POST /api/screen` | `{"symbols": [], "max_picks": 5, "shortlist": 30, "ai": null, "record": false}` → kandidat, pilihan, saham yang ditolak beserta alasannya |
 | `GET /api/health` | Versi, benchmark, status `idx`, ringkasan jurnal |
 | `GET /api/watchlist` / `POST` | Daftar + harga; `{"add": ["ANTM.JK"]}` atau `{"remove": "..."}` |
 | `GET /api/market?symbol=&range=` | Bar OHLCV + indikator |
@@ -377,8 +384,9 @@ Kode saham boleh ditulis pendek: `BBCA` otomatis menjadi `BBCA.JK`.
 
 - **Bukan nasihat investasi.** Mesin ini membaca aturan yang ditulis manusia; ia tidak
   tahu berita hari ini, tidak membaca laporan keuangan, dan tidak mengenal manajemen.
-- **Tanpa autentikasi.** Server hanya melayani komputer ini (`127.0.0.1`). Siapa pun yang
-  memakai mesin yang sama dapat memicu analisis — dan bila lapisan AI aktif, itu berarti
+- **Tanpa autentikasi.** Tanpa `--host`, server hanya melayani komputer ini (`127.0.0.1`);
+  dengan `--host` ia terbuka ke jaringan yang dituju, tetap tanpa login. Siapa pun yang
+  dapat menjangkau port itu dapat memicu analisis — dan bila lapisan AI aktif, itu berarti
   memakai kuota model Anda.
 - **Harga tertunda.** Yahoo Finance tidak real-time. Untuk eksekusi, gunakan data broker Anda.
 - **Tidak ada analisis historis.** Semua perhitungan memakai data terbaru; jurnal menilai
@@ -457,8 +465,8 @@ proksi harga, dan kartunya berlabel `proksi`.
 Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
 
 ```bash
-python tools/test_pure.py        # 107 cek backend: indikator, dewan, jurnal, pemindai
-node tools/test_pure.mjs         # 46 cek frontend: ringkasan, simulator, chart, escape
+python tools/test_pure.py        # 122 cek backend: indikator, dewan, jurnal, pemindai, HTTP
+node tools/test_pure.mjs         # 50 cek frontend: ringkasan, simulator, chart, escape, ticker
 ```
 
 Satu pemeriksaan manual, karena memakai analisis sungguhan dari Yahoo Finance:

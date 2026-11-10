@@ -107,8 +107,21 @@ function toast(message, isError = false) {
 function normaliseSymbol(raw) {
   const value = String(raw || "").trim().toUpperCase();
   if (!value) return "";
+  if (value === "IHSG") return "IHSG.JK";
   if (/^[A-Z]{4}$/.test(value)) return `${value}.JK`;
   return value;
+}
+
+/* The server accepts four-letter IDX codes or an explicit suffix. Mirrors
+   app.py's _requested_symbol so the dashboard explains the rule before the
+   request, instead of sending "ABC" to a foreign listing. */
+function symbolProblem(symbol) {
+  if (!symbol) return "kode saham wajib diisi.";
+  if (!/^[A-Z0-9][A-Z0-9.^=+-]{0,15}$/.test(symbol)) return `"${symbol}" bukan kode saham yang valid.`;
+  if (/^[A-Z]+$/.test(symbol) && symbol.length !== 4) {
+    return `"${symbol}" bukan kode IDX empat huruf; untuk simbol lain sertakan akhiran (mis. BTC-USD).`;
+  }
+  return "";
 }
 
 /* ---------- boot ---------- */
@@ -140,8 +153,12 @@ async function boot() {
 
   // The watchlist has no stream of its own: one poll every 30 seconds keeps
   // eight cards current, and the server caches each symbol for 30 seconds.
-  setInterval(loadWatchlist, 30000);
-  setInterval(loadBenchmark, 60000);
+  // A hidden tab has nothing to repaint, so it skips the poll entirely.
+  setInterval(() => { if (!document.hidden) loadWatchlist(); }, 30000);
+  setInterval(() => { if (!document.hidden) loadBenchmark(); }, 60000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) loadWatchlist();
+  });
   window.addEventListener("beforeunload", stopLive);
 
   const savedJob = prefs.analysisJob;
@@ -260,10 +277,16 @@ async function loadWatchlist() {
     state.watch = payload;
     const focusSym = document.activeElement?.closest?.(".wrow")?.dataset.symbol ?? null;
     const focusDel = document.activeElement?.classList?.contains("del") ?? false;
-    body.innerHTML = payload.quotes.map(watchRow).join("") || '<p class="muted pad">Watchlist kosong.</p>';
-    if (focusSym) {
-      const row = body.querySelector(`.wrow[data-symbol="${CSS.escape(focusSym)}"]`);
-      (focusDel ? row?.querySelector(".del") : row?.querySelector(".rowmain"))?.focus();
+    const markup = payload.quotes.map(watchRow).join("") || '<p class="muted pad">Watchlist kosong.</p>';
+    // Repainting identical markup every 30 s drops focus and scroll position for
+    // no visual change; only rebuild when a quote actually moved.
+    if (body.dataset.markup !== markup) {
+      body.dataset.markup = markup;
+      body.innerHTML = markup;
+      if (focusSym) {
+        const row = body.querySelector(`.wrow[data-symbol="${CSS.escape(focusSym)}"]`);
+        (focusDel ? row?.querySelector(".del") : row?.querySelector(".rowmain"))?.focus();
+      }
     }
     paintQuick(payload.symbols);
     flashChanged(previous, payload.quotes);
@@ -1018,7 +1041,7 @@ async function runAnalysis() {
         body: JSON.stringify({ symbol: state.symbol, holding_days: 5, range: state.range, ai: prefs.ai }),
       });
     } catch (error) {
-      if (error.status !== 404 || !/unknown endpoint/i.test(error.message)) throw error;
+      if (error.status !== 404) throw error;
       // Older running server has only the original synchronous endpoint.
       // Keep the visible progress UI and fall back instead of surfacing 404.
       Object.assign(job, { stage: "legacy", message: "Server belum diperbarui; analisis tetap berjalan, tetapi status tidak dapat dipulihkan setelah refresh." });
@@ -1681,6 +1704,8 @@ function activateTab(button) {
     other.tabIndex = on ? 0 : -1;
   });
   state.tab = button.dataset.tab;
+  const panel = $("#panel");
+  if (panel && button.id) panel.setAttribute("aria-labelledby", button.id);
   paintPanel(state.tab);
 }
 
@@ -1756,8 +1781,8 @@ function wireEvents() {
   $("#add-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const symbol = normaliseSymbol($("#add-symbol").value);
-    if (!symbol) return;
-    if (!/^[A-Z]{1,6}(\.JK)?$/.test(symbol)) return toast(`"${symbol}" bukan kode saham yang valid.`, true);
+    const problem = symbolProblem(symbol);
+    if (problem) return toast(problem, true);
     try {
       await api("/api/watchlist", { method: "POST", body: JSON.stringify({ add: [symbol] }) });
       $("#add-symbol").value = "";
@@ -1778,5 +1803,5 @@ if (typeof module !== "undefined") {
                      aiStrip, paintVerdict, renderDecisionSummary, renderSimulator,
                       renderSimulationResult, showCross, hideCross, axisLabel, fullLabel,
                      viewScreener, state, prefs, esc, rp, pct, analysisBelongsTo,
-                     renderPlan, statCards, api };
+                     renderPlan, statCards, api, normaliseSymbol, symbolProblem };
 }

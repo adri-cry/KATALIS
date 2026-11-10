@@ -143,6 +143,25 @@ def chart(symbol: str, range_: str = _DEFAULT_RANGE, *, fresh: bool = False,
     return payload
 
 
+def _session_day(stamp: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(stamp))
+
+
+def _previous_close(bars: list, interval: str):
+    """The close before the current session.
+
+    Intraday series carry no daily close: ``bars[-2]`` is five minutes ago, not
+    yesterday. Walk back to the first bar of the last session instead.
+    """
+    if interval.endswith(("m", "h")):
+        day = _session_day(bars[-1]["t"])
+        index = len(bars) - 1
+        while index > 0 and _session_day(bars[index - 1]["t"]) == day:
+            index -= 1
+        return bars[index - 1]["c"] if index > 0 else None
+    return bars[-2]["c"] if len(bars) > 1 else bars[-1]["c"]
+
+
 def _parse(node: dict, symbol: str, range_: str, interval: str) -> dict:
     meta = node.get("meta") or {}
     stamps = node.get("timestamp") or []
@@ -176,7 +195,7 @@ def _parse(node: dict, symbol: str, range_: str, interval: str) -> dict:
         "range": range_,
         "interval": interval,
         "price": float(price) if price is not None else bars[-1]["c"],
-        "prev_close": _num(meta.get("chartPreviousClose")) or (bars[-2]["c"] if len(bars) > 1 else bars[-1]["c"]),
+        "prev_close": _num(meta.get("chartPreviousClose")) or _previous_close(bars, interval),
         "timezone": meta.get("exchangeTimezoneName") or "Asia/Jakarta",
         "bars": bars,
         "fetched_at": int(time.time()),
@@ -224,28 +243,40 @@ def _ema_series(values: list[float], window: int) -> list[float]:
 
 
 def _rsi(values: list[float], window: int = 14):
+    """Wilder's RSI: seed with the first ``window`` changes, then smooth.
+
+    A simple average of only the last ``window`` changes makes the reading jump
+    whenever an old change drops out of the window; Wilder's recursion is what
+    traders and the original indicator actually use.
+    """
     if len(values) <= window:
         return None
-    gains, losses = [], []
-    for previous, current in zip(values[-window - 1:], values[-window:]):
-        change = current - previous
-        gains.append(max(change, 0.0))
-        losses.append(max(-change, 0.0))
-    avg_gain, avg_loss = sum(gains) / window, sum(losses) / window
+    changes = [current - previous for previous, current in zip(values, values[1:])]
+    gains = [max(change, 0.0) for change in changes]
+    losses = [max(-change, 0.0) for change in changes]
+    avg_gain = sum(gains[:window]) / window
+    avg_loss = sum(losses[:window]) / window
+    for gain, loss in zip(gains[window:], losses[window:]):
+        avg_gain = (avg_gain * (window - 1) + gain) / window
+        avg_loss = (avg_loss * (window - 1) + loss) / window
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
     return 100 - 100 / (1 + avg_gain / avg_loss)
 
 
 def _atr(bars: list, window: int = 14):
+    """Wilder's ATR, seeded by the first ``window`` true ranges."""
     if len(bars) <= window:
         return None
     spans = []
-    for previous, current in zip(bars[-window - 1:-1], bars[-window:]):
+    for previous, current in zip(bars[:-1], bars[1:]):
         spans.append(max(current["h"] - current["l"],
                          abs(current["h"] - previous["c"]),
                          abs(current["l"] - previous["c"])))
-    return sum(spans) / len(spans)
+    atr = sum(spans[:window]) / window
+    for span in spans[window:]:
+        atr = (atr * (window - 1) + span) / window
+    return atr
 
 
 def _stdev(values: list[float]) -> float:
@@ -313,6 +344,7 @@ def indicators(bars: list) -> dict:
 
     atr = _atr(bars)
     atr_pct = (atr / last * 100) if atr and last else None
+    rsi, mfi, obv_slope = _rsi(closes), _mfi(bars), _obv_slope(bars)
     window20 = closes[-20:]
     band_mid = sum(window20) / len(window20) if window20 else None
     band_sd = _stdev(window20)
@@ -343,7 +375,7 @@ def indicators(bars: list) -> dict:
         "sma50": round(sma50, 2) if sma50 else None,
         "sma200": round(sma200, 2) if sma200 else None,
         "ema10": round(ema10[-1], 2) if ema10 else None,
-        "rsi14": round(_rsi(closes), 1) if _rsi(closes) is not None else None,
+        "rsi14": round(rsi, 1) if rsi is not None else None,
         "macd": round(macd_line, 2) if macd_line is not None else None,
         "macd_signal": round(signal_line, 2) if signal_line is not None else None,
         "macd_hist": round(hist, 2) if hist is not None else None,
@@ -353,15 +385,15 @@ def indicators(bars: list) -> dict:
         "bb_upper": round(upper, 2) if upper else None,
         "bb_lower": round(lower, 2) if lower else None,
         "bb_pct_b": round(percent_b, 3) if percent_b is not None else None,
-        "mfi14": round(_mfi(bars), 1) if _mfi(bars) is not None else None,
-        "obv_slope": round(_obv_slope(bars), 3) if _obv_slope(bars) is not None else None,
+        "mfi14": round(mfi, 1) if mfi is not None else None,
+        "obv_slope": round(obv_slope, 3) if obv_slope is not None else None,
         "vol_avg20": round(vol_avg20, 0) if vol_avg20 else None,
         "vol_ratio": round(volumes[-1] / vol_avg20, 2) if volumes and vol_avg20 else None,
         "high_52w": round(high52, 2),
         "low_52w": round(low52, 2),
         "pos_52w": round((last - low52) / (high52 - low52), 3) if high52 > low52 else None,
         "volatility_pct": round(_stdev(daily[-63:]) * math.sqrt(252) * 100, 1) if len(daily) > 20 else None,
-        "max_drawdown_pct": round(_max_drawdown(closes[-126:]) * 100, 1) if len(closes) > 20 else None,
+        "max_drawdown_pct": round(_max_drawdown(closes) * 100, 1) if len(closes) > 20 else None,
         "up_down_volume": (round(sum(up_days) / sum(down_days), 2)
                            if up_days and down_days and sum(down_days) else None),
         "returns": {k: (round(v * 100, 2) if v is not None else None) for k, v in returns.items()},

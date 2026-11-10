@@ -87,8 +87,8 @@ dihapus. Karya turunan dari TradingAgents (Apache-2.0) dan idx (MIT); atribusi a
 - `docs/preview.png` — pratinjau dashboard yang dirender `tools/make_preview.py` dari data
   pasar sungguhan (bukan tangkapan layar).
 - `tools/check_ui.mjs` — 42 pemeriksaan render dashboard (36 tanpa AI; manual, butuh
-  server + jaringan); `tools/test_pure.py` — 107 cek backend dengan data sintetis, tanpa
-  jaringan; `tools/test_pure.mjs` — 46 cek frontend, tanpa jaringan; `tools/check_crosshair.js`.
+  server + jaringan); `tools/test_pure.py` — 122 cek backend dengan data sintetis, tanpa
+  jaringan; `tools/test_pure.mjs` — 50 cek frontend, tanpa jaringan; `tools/check_crosshair.js`.
 - `data/cache/` — cuplikan harga Yahoo sungguhan (BBCA.JK, BUVA.JK).
 - Ketiadaan yang tidak boleh dikarang: belum pernah dijalankan terhadap Yahoo sungguhan
   lewat pemindai, belum pernah memanggil model sungguhan (per HANDOFF.md); tidak ada

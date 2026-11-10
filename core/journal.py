@@ -14,6 +14,7 @@ deliberately the same arithmetic as a benchmarked settlement elsewhere:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from . import market, store
@@ -46,15 +47,22 @@ def settle_all(holding_days: int | None = None) -> dict:
             {"symbol": "*", "reason": f"benchmark IHSG tidak tersedia: {exc}"}], "stats": store.stats()}
 
     settled, waiting, failed = [], [], []
-    cache: dict[str, dict | market.MarketError] = {}
+    cache: dict[str, list[dict] | market.MarketError] = {}
+
+    def fetch(symbol: str):
+        try:
+            return symbol, _dated_bars(symbol)
+        except market.MarketError as exc:
+            return symbol, exc
+
+    # One chart per distinct symbol; fetch them together so a journal of ten
+    # pending names does not wait ten round-trips before the first is scored.
+    unique = sorted({row["symbol"] for row in rows})
+    with ThreadPoolExecutor(max_workers=min(8, len(unique))) as pool:
+        cache.update(pool.map(fetch, unique))
 
     for row in rows:
         symbol = row["symbol"]
-        if symbol not in cache:
-            try:
-                cache[symbol] = _dated_bars(symbol)
-            except market.MarketError as exc:
-                cache[symbol] = exc
         bars = cache[symbol]
         if isinstance(bars, market.MarketError):
             failed.append({"symbol": symbol, "date": row["trade_date"], "reason": str(bars)})

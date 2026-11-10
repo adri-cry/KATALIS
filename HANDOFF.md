@@ -23,9 +23,10 @@ KATALIS adalah dashboard analisis saham IDX, **hanya pustaka standar Python** (t
 
 `core/screener.py` menjawab "dari daftar saham ini, mana yang layak dibeli sekarang".
 
-1. **Gerbang (kode):** satu snapshot per saham; tolak yang ilikuid, murah, terlalu liar,
-   riwayat pendek, atau datanya basi; urutkan sisanya menurut skor teknikal; `shortlist`
-   teratas lanjut.
+1. **Gerbang (kode):** satu snapshot per saham; tolak yang datanya basi (>7 hari), harganya
+   di bawah Rp1, atau riwayatnya < 20 sesi. Turnover dan ATR dicatat, bukan ditolak — gerbang
+   sistem di tahap 2 yang menentukan. Urutkan sisanya menurut skor teknikal, tambahkan 5 top
+   gainer hari itu, lalu `shortlist` teratas (default 30) lanjut.
 2. **Dewan (kode):** `desk.analyse` penuh hanya untuk shortlist; tolak yang di bawah
    Overweight.
 3. **Model (opsional, satu panggilan):** menilai semua kandidat sekaligus.
@@ -81,6 +82,29 @@ Sudah:
   `picks_source` pada beberapa run pertama.
 - Biner `idx` belum diuji bersama pemindai, jadi waktu tunggu untuk shortlist besar belum
   terukur.
+
+## Audit 10-11-2026: perbaikan dari review kode
+
+- Input ticker: hanya empat huruf (IDX) atau simbol dengan akhiran eksplisit; kode
+  ambigu ditolak 400 di server dan dijelaskan di form (`_requested_symbol`,
+  `symbolProblem`).
+- `/api/*` GET juga memetakan `BadRequest`/`ValueError` ke 400; pesan 500 generik dan
+  tidak lagi memuat nama kelas. `_static` memakai `Path.is_relative_to`.
+- Body POST wajib `application/json` (415), maksimal 1 MB (413); Host/Origin di luar
+  localhost ditolak 403. `/api/health` tidak lagi memuat path absolut `.env`.
+- Wilder RSI/ATR; drawdown dari seluruh riwayat; SMA200 diambil dari seri 1 tahun bila
+  rentang default 6 bulan tidak cukup; `prev_close` intraday memakai close sesi
+  sebelumnya; batas rating mengikuti tabel README; confidence memakai kurva tanh
+  sehingga sinyal kuat tidak selalu mentok 0,95.
+- `guidance.simulate` (duplikat yang masih mengizinkan short) dihapus;
+  `simulation.calculate` satu-satunya jalur simulasi.
+- Watchlist dan penyelesaian jurnal mengambil harga paralel; pemindai memakai ekuitas
+  tersimpan (lot tidak lagi kosong) dan menerima `max_candidates` dari API.
+- UI: fallback server lama memakai status 404, bukan teks pesan; tab punya
+  `aria-controls`/`aria-labelledby`; watchlist tidak direbuild bila markup sama; poll
+  berhenti saat tab tersembunyi.
+- Verifikasi: `tools/test_pure.py` 122/122, `tools/test_pure.mjs` 50/50, plus probe
+  HTTP langsung (400/403/413/415, traversal 404, SSE/tick/benchmark).
 
 ## Batas yang diketahui
 

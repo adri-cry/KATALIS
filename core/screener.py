@@ -354,22 +354,21 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
 
     # -- stage 1: price snapshot and the gate -------------------------------
     passed: list[tuple[str, float]] = []
-    day_change: dict[str, float] = {}   # semua simbol yang snapshot-nya segar, apa pun hasil gerbangnya
-    fresh: set[str] = set()
+    day_change: dict[str, float] = {}   # gate-passing symbols that rose today
     for symbol, snap, error in _in_pool(lambda s: market.snapshot(s, range_), universe, workers):
         if error:
             errors.append({"symbol": symbol, "error": error})
             continue
         last_session = _last_session(snap)
-        if (today - last_session).days <= gate.max_stale_days:
-            fresh.add(symbol)
-            bars = snap.get("bars") or []
-            if len(bars) >= 2 and bars[-2].get("c"):
-                day_change[symbol] = (bars[-1]["c"] / bars[-2]["c"] - 1) * 100
         reasons = gate_reasons(snap["indicators"], last_session, today, gate)
         if reasons:
             rejected.append({"symbol": symbol, "stage": "gerbang", "reasons": reasons})
             continue
+        bars = snap.get("bars") or []
+        if len(bars) >= 2 and bars[-2].get("c"):
+            change = (bars[-1]["c"] / bars[-2]["c"] - 1) * 100
+            if change > 0:
+                day_change[symbol] = change
         technical = desk._role_market(snap)            # same-package use of the desk's technical role
         if technical["score"] <= 0:
             rejected.append({"symbol": symbol, "stage": "teknikal",
@@ -388,16 +387,19 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
     #    slot ini hanya menjamin mereka dinilai dan tercatat.
     forced: list[dict] = []
     for symbol, change in sorted(day_change.items(), key=lambda kv: kv[1], reverse=True)[:5]:
-        if symbol in fresh and symbol not in short:
+        if symbol not in short:
             rejected[:] = [r for r in rejected if r["symbol"] != symbol]
             short.append(symbol)
             forced.append({"symbol": symbol, "change_pct": round(change, 2),
                            "alasan": "top gainer hari itu (slot wajib lapis 1)"})
 
     # -- stage 2: the full desk, only for the shortlist ----------------------
+    # Size lots from the stored portfolio: at equity 0 the plan cannot compute a
+    # position and every candidate came back with "isi nilai portofolio".
+    equity = store.cash() + sum(row["quantity"] * row["avg_price"] for row in store.positions())
     analyses: list[dict] = []
     for symbol, analysis, error in _in_pool(
-            lambda s: desk.analyse(s, range_, holding_days, equity=0.0), short, min(workers, 2)):
+            lambda s: desk.analyse(s, range_, holding_days, equity=equity), short, min(workers, 2)):
         if error:
             errors.append({"symbol": symbol, "error": error})
             continue

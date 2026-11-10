@@ -423,9 +423,9 @@ def _rating(composite: float) -> str:
         return "Buy"
     if composite >= 0.3:
         return "Overweight"
-    if composite > -0.3:
+    if composite >= -0.3:
         return "Hold"
-    if composite > -0.9:
+    if composite >= -0.9:
         return "Underweight"
     return "Sell"
 
@@ -433,7 +433,9 @@ def _rating(composite: float) -> str:
 def _confidence(composite: float, roles: list[dict]) -> float:
     available = [r for r in roles if r["available"]]
     spread = statistics.pstdev([r["score"] for r in available]) if len(available) > 1 else 0.0
-    value = 0.48 + 0.22 * abs(composite) + 0.05 * len(available) - 0.16 * spread
+    # Saturating curve: a strong composite should read as "high", not pin the
+    # 0.95 ceiling and stop distinguishing 0.9 from 1.6.
+    value = 0.44 + 0.30 * math.tanh(1.2 * abs(composite)) + 0.04 * len(available) - 0.12 * spread
     return round(min(0.95, max(0.25, value)), 2)
 
 
@@ -449,7 +451,18 @@ def _plan(ind: dict, rating: str, equity: float) -> dict:
     else:
         stop, target = last - 2.0 * atr, last + 2.0 * atr
 
-    entry, stop, target = _round_tick(last), _round_tick(stop), _round_tick(target)
+    entry = _round_tick(last)
+    tick = _tick(entry)
+    stop, target = _round_tick(stop), _round_tick(target)
+    # A cheap stock can round both sides onto the entry price: at Rp31 with a
+    # 1-point tick, entry-1.8*ATR may round back to 31 and the plan would show
+    # zero risk. Keep at least one tick between entry and each side.
+    if bearish:
+        stop = max(stop, entry + tick)
+        target = min(target, max(tick, entry - tick))
+    else:
+        stop = max(tick, min(stop, entry - tick))
+        target = max(target, entry + tick)
     risk_per_share = abs(entry - stop)
     reward_per_share = abs(target - entry)
     rr = round(reward_per_share / risk_per_share, 2) if risk_per_share else None
@@ -498,6 +511,16 @@ def analyse(ticker: str, range_: str = "6mo", holding_days: int = 5,
     """Run the whole desk over one instrument and return the decision plus its working."""
     snap = market.snapshot(ticker, range_)
     ind = snap["indicators"]
+    if ind.get("sma200") is None:
+        # A 6-month window holds ~126 sessions. The 200-day average has to come
+        # from a longer series; otherwise the long-term criterion silently
+        # disappears from the market role instead of reading "no data".
+        try:
+            long_bars = market.chart(ticker, "1y")["bars"]
+        except market.MarketError:
+            long_bars = []
+        if len(long_bars) >= 200:
+            ind["sma200"] = round(sum(bar["c"] for bar in long_bars[-200:]) / 200, 2)
 
     roles = _analyse_roles(ticker, snap)
 
