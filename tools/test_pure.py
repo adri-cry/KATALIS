@@ -622,6 +622,7 @@ check("model: batas jumlah pilihan dipaksa oleh kode", len(capped) == 2, str(cap
 real_chart, real_status, real_chat = market.chart, llm.status, llm.chat_json
 real_db = store.DB_PATH
 try:
+    store.init()
     market.chart = fake_chart(SCREEN_TABLE)
 
     # mechanical run: no model involved
