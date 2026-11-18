@@ -179,7 +179,22 @@ dinilai setelah jendela 5 sesi bursa terlewati:
 
 Alpha positif berarti keputusan itu mengalahkan pasar, bukan sekadar ikut naik.
 Rating `Hold` tidak mengklaim arah, jadi ia tidak diberi angka "tepat" — supaya tidak
-mendapat kemenangan gratis.
+mendapat kemenangan gratis. Penilaian dijalankan otomatis sekali saat server start;
+tombol **Nilai keputusan yang jatuh tempo** di tab Jurnal tetap ada untuk menjalankannya
+lagi. Bar yang belum diperdagangkan (volume 0, misalnya sesi yang masih berjalan atau
+saham yang dihentikan) tidak dihitung sebagai sesi masuk/keluar.
+
+Untuk mengisi rekam jejak tanpa menunggu klik harian:
+
+```bash
+python tools/daily.py          # pemindai --record tanpa AI (gratis), lalu nilai yang jatuh tempo
+python tools/daily.py --ai     # opsional: satu panggilan model untuk shortlist
+```
+
+Jadwalkan berkas itu lewat cron/Task Scheduler; contoh ada di docstring `tools/daily.py`.
+Tab Jurnal menampilkan jumlah sampel dan margin kesalahan 95% di samping hit rate:
+dari ±34 keputusan berarah, angka "50% tepat" masih bisa berarti 33% atau 67%.
+Jangan ubah bobot atau ambang sebelum sampel berarah mencapai ~96 (presisi ±10%).
 
 ---
 
@@ -331,13 +346,16 @@ hanya untuk shortlist, dan **satu** panggilan model untuk semuanya:
 
 | Tahap | Dikerjakan | Yang ditolak |
 |---|---|---|
-| 1. Gerbang | kode | data terakhir > 7 hari lalu, harga < Rp1, riwayat < 20 sesi, lalu skor teknikal ≤ 0. Nilai transaksi dan ATR dicatat tetapi tidak lagi menolak di tahap ini (gerbang sistem di tahap 2 yang menentukan); 5 top gainer hari itu selalu dilanjutkan. Sisanya diurutkan; `shortlist` teratas (default 30) lanjut |
-| 2. Dewan | kode (`desk.analyse`) | rating mesin di bawah Overweight |
+| 1. Gerbang | kode | data terakhir > 7 hari lalu, harga < Rp1, riwayat < 20 sesi, lalu skor teknikal ≤ 0. Nilai transaksi dan ATR dicatat tetapi tidak lagi menolak di tahap ini (gerbang sistem di tahap 2 yang menentukan); 5 top gainer di antara saham yang lolos gerbang lapis 1 selalu dilanjutkan. Sisanya diurutkan; `shortlist` teratas (default 30) lanjut |
+| 2. Dewan | kode (`desk.analyse`) | rating mesin di bawah Overweight; lalu gerbang sistem: ATR > 7%, R:R < 1:1, atau kurang dari 3 peran punya data |
 | 3. Model | satu panggilan | kandidat yang diturunkan model ke Hold atau lebih rendah; model boleh mengembalikan **nol** pilihan |
 
-Batas gerbang ada di `Gate` (`core/screener.py`). Setiap saham yang ditolak tercatat
-beserta tahap dan alasannya (`rejected`), dan saham yang gagal diambil masuk `errors` —
-tidak ada yang hilang diam-diam.
+Batas gerbang ada di `Gate` (`core/screener.py`). Gerbang sistem memakai konstanta yang
+sama dengan `core/guidance.py` (ATR 7%, R:R 1:1, minimal 3 peran), jadi saham yang jadi
+pilihan pemindai tidak akan ditampilkan sebagai "Tunggu, risiko tinggi" di dashboard.
+Angkanya masih default kebijakan, belum hasil kalibrasi — sesuaikan setelah jurnal
+punya cukup sampel. Setiap saham yang ditolak tercatat beserta tahap dan alasannya
+(`rejected`), dan saham yang gagal diambil masuk `errors` — tidak ada yang hilang diam-diam.
 
 Aturan yang dijaga kode, bukan hanya prompt:
 
@@ -465,8 +483,8 @@ proksi harga, dan kartunya berlabel `proksi`.
 Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
 
 ```bash
-python tools/test_pure.py        # 123 cek backend: indikator, dewan, jurnal, pemindai, HTTP
-node tools/test_pure.mjs         # 50 cek frontend: ringkasan, simulator, chart, escape, ticker
+python tools/test_pure.py        # 132 cek backend: indikator, dewan, jurnal, pemindai, HTTP
+node tools/test_pure.mjs         # 51 cek frontend: ringkasan, simulator, chart, escape, ticker
 ```
 
 Satu pemeriksaan manual, karena memakai analisis sungguhan dari Yahoo Finance:

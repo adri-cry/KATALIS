@@ -131,7 +131,11 @@ def advise(analysis: dict, portfolio: dict | None = None,
 
     raw = llm.chat_json(_SYSTEM, user, on_event=on_event)
     mechanical = (analysis.get("decision") or {}).get("rating")
-    rating = _clean(raw.get("rating"), fallback=mechanical)
+    # A rating the model did not actually return is NOT an AI opinion. Falling
+    # back silently would write the machine's rating into the AI column and
+    # report "agrees_with_desk" as if the model had agreed. Fail instead, so
+    # app.py records the reason in ai_error and the journal stays honest.
+    rating = _clean(raw.get("rating"))
     if rating is None:
         raise llm.LLMError(f"rating dari model tidak dikenali: {raw.get('rating')!r}")
 

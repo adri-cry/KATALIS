@@ -197,7 +197,7 @@ def _role_flow(ticker: str, snap: dict) -> dict:
                         f"Aliran {'masuk' if streak > 0 else 'keluar'} {abs(streak)} sesi beruntun.")
                 return _role("flow", "Analis Aliran Asing", score, bull, bear, source="idx")
         except Exception as exc:  # noqa: BLE001 — a broken feed degrades to the proxy, visibly
-            fallback = f"data idx gagal: {idxbridge.explain(exc)}"
+            fallback = f"Data idx gagal: {idxbridge.explain(exc)}"
 
     ind = snap["indicators"]
     score, bull, bear = 0.0, [], []
@@ -252,7 +252,7 @@ def _role_bandar(ticker: str, snap: dict) -> dict:
                     return _role("bandar", "Analis Bandar", points, bull, bear,
                                  source="idx", ceiling=1.8)
         except Exception as exc:  # noqa: BLE001
-            fallback = f"data idx gagal: {idxbridge.explain(exc)}"
+            fallback = f"Data idx gagal: {idxbridge.explain(exc)}"
 
     ind = snap["indicators"]
     score, bull, bear = 0.0, [], []

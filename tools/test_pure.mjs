@@ -29,7 +29,8 @@ check("escape: tanda kutip aman", ui.esc('a"b') === "a&quot;b");
 
 // ---- ticker validation ------------------------------------------------------
 check("simbol: empat huruf menjadi listing IDX", ui.normaliseSymbol("bbca") === "BBCA.JK");
-check("simbol: IHSG menjadi kode Yahoo", ui.normaliseSymbol("ihsg") === "IHSG.JK");
+check("simbol: IHSG menjadi kode Yahoo", ui.normaliseSymbol("ihsg") === "^JKSE");
+check("simbol: IHSG.JK juga dipetakan ke benchmark", ui.normaliseSymbol("IHSG.JK") === "^JKSE");
 check("simbol: kode pendek/panjang ditolak dengan alasan",
       ui.symbolProblem("ABC") !== "" && ui.symbolProblem("ABCDE") !== "");
 check("simbol: kode empat huruf dan akhiran eksplisit diterima",
@@ -164,7 +165,7 @@ const simResultHtml = ui.renderSimulationResult({ result: { entry_notional: 2000
   gross_target_pnl: 20000, gross_stop_pnl: -10000,
   fees_included: false, gross_reward_risk: 2, direction: "long" } });
 check("simulator: labels gross P/L and non-probability risk", simResultHtml.includes("kotor, biaya belum dihitung")
-  && simResultHtml.includes("bukan probabilitas berhasil"));
+  && simResultHtml.includes("Bukan probabilitas berhasil"));
 
 // ---- a job belongs to the symbol it was started for --------------------------
 // Painting a verdict belonging to another symbol over the current chart was the

@@ -25,20 +25,20 @@ ASSETS = ROOT / "docs"
 BASE = "http://127.0.0.1:8770"
 
 # Colours copied from web/styles.css so the preview and the page agree.
-BG = (10, 14, 19)
-PANEL = (17, 26, 35)
-PANEL_2 = (22, 34, 45)
-LINE = (26, 40, 54)
-LINE_STRONG = (34, 50, 63)
-TEXT = (232, 239, 245)
-MUTED = (143, 163, 179)
-FAINT = (111, 132, 148)
-ACCENT = (240, 180, 41)
-ACCENT_DARK = (36, 26, 2)
-UP = (34, 197, 94)
-DOWN = (239, 68, 68)
-HOLD = (148, 163, 184)
-ACTIVE_ROW = (28, 40, 30)
+BG = (244, 241, 232)          # paper
+PANEL = (251, 249, 243)       # sheet
+PANEL_2 = (239, 234, 222)     # tint
+LINE = (213, 207, 190)        # hairline rule
+LINE_STRONG = (28, 26, 22)    # ink
+TEXT = (28, 26, 22)
+MUTED = (112, 106, 93)
+FAINT = (140, 132, 116)
+ACCENT = (154, 47, 47)        # brick red
+ACCENT_DARK = (251, 249, 243)
+UP = (31, 107, 71)
+DOWN = (154, 47, 47)
+HOLD = (107, 101, 89)
+ACTIVE_ROW = (236, 229, 212)
 
 SCALE = 2
 W, H = 1500, 940
@@ -221,7 +221,7 @@ def main() -> int:
     for label, colour in chips:
         w = width_of(label, "mono", 9) + 20
         draw.rounded_rectangle([x * SCALE, 30 * SCALE, (x + w) * SCALE, 50 * SCALE],
-                               radius=10 * SCALE, outline=colour, width=SCALE)
+                               radius=2 * SCALE, outline=colour, width=SCALE)
         text((x + 10, 34), label, "mono", 9, colour)
         x += w + 9
     text((1466, 33), "IHSG", "mono", 9, FAINT, anchor="ra")
@@ -229,13 +229,13 @@ def main() -> int:
 
     # ---- search ---------------------------------------------------------
     draw.rounded_rectangle([34 * SCALE, 84 * SCALE, 500 * SCALE, 124 * SCALE],
-                           radius=11 * SCALE, fill=PANEL, outline=LINE_STRONG, width=SCALE)
+                           radius=2 * SCALE, fill=PANEL, outline=LINE_STRONG, width=SCALE)
     text((48, 96), "BBCA.JK", "mono", 13, TEXT)
     draw.rounded_rectangle([510 * SCALE, 84 * SCALE, 632 * SCALE, 124 * SCALE],
-                           radius=11 * SCALE, fill=ACCENT)
+                           radius=2 * SCALE, fill=ACCENT)
     text((571, 96), "Analisis", "bold", 13, ACCENT_DARK, anchor="ma")
 
-    text((652, 90), "pakai AI", "regular", 10, MUTED)
+    text((652, 90), "Pakai AI", "regular", 10, MUTED)
     draw.rounded_rectangle([716 * SCALE, 92 * SCALE, 728 * SCALE, 104 * SCALE],
                            radius=2 * SCALE, fill=ACCENT)
     text((740, 90), "otomatis saat dibuka", "regular", 10, MUTED)
@@ -252,7 +252,7 @@ def main() -> int:
         active = quote["symbol"] == "BBCA.JK"
         if active:
             draw.rounded_rectangle([38 * SCALE, y * SCALE, 296 * SCALE, (y + 60) * SCALE],
-                                   radius=7 * SCALE, fill=ACTIVE_ROW)
+                                   radius=2 * SCALE, fill=ACTIVE_ROW)
             draw.rectangle([38 * SCALE, y * SCALE, 41 * SCALE, (y + 60) * SCALE], fill=ACCENT)
         text((52, y + 10), quote["symbol"].replace(".JK", ""), "mono", 12.5, TEXT)
         text((52, y + 31), (quote.get("name") or "")[:24], "regular", 8.5, FAINT)
@@ -270,7 +270,7 @@ def main() -> int:
     text((452, 186), pct(chart["indicators"]["change_pct"]), "mono", 10.5,
          tone(chart["indicators"]["change_pct"]))
     draw.rounded_rectangle([520 * SCALE, 186 * SCALE, 556 * SCALE, 200 * SCALE],
-                           radius=7 * SCALE, outline=UP, width=SCALE)
+                           radius=2 * SCALE, outline=UP, width=SCALE)
     text((526, 189), "LIVE", "mono", 7.5, UP)
 
     ranges = ["1H", "5H", "1B", "3B", "6B", "1T", "2T"]
@@ -280,7 +280,7 @@ def main() -> int:
         w = 26
         if active:
             draw.rounded_rectangle([rx * SCALE, 164 * SCALE, (rx + w) * SCALE, 184 * SCALE],
-                                   radius=6 * SCALE, outline=ACCENT, width=SCALE)
+                                   radius=2 * SCALE, outline=ACCENT, width=SCALE)
         text((rx + 8, 168), name, "mono", 9, ACCENT if active else MUTED)
         rx += w + 5
 
@@ -308,7 +308,7 @@ def main() -> int:
     label = "UNDERWEIGHT"
     pill_w = width_of(label, "bold", 9.5) + 22
     draw.rounded_rectangle([1216 * SCALE, 172 * SCALE, (1216 + pill_w) * SCALE, 198 * SCALE],
-                           radius=9 * SCALE, outline=rating_colour, width=SCALE)
+                           radius=2 * SCALE, outline=rating_colour, width=SCALE)
     text((1227, 179), label, "bold", 9.5, rating_colour)
 
     text((1216, 214), number(chart["price"]), "bold", 25, TEXT)
@@ -318,9 +318,9 @@ def main() -> int:
     text((1216, 296), "KEYAKINAN", "regular", 7.5, FAINT)
     text((1446, 296), "58%", "mono", 9, MUTED, anchor="ra")
     draw.rounded_rectangle([1216 * SCALE, 310 * SCALE, 1446 * SCALE, 317 * SCALE],
-                           radius=4 * SCALE, fill=PANEL_2)
+                           radius=2 * SCALE, fill=PANEL_2)
     draw.rounded_rectangle([1216 * SCALE, 310 * SCALE, 1350 * SCALE, 317 * SCALE],
-                           radius=4 * SCALE, fill=ACCENT)
+                           radius=2 * SCALE, fill=ACCENT)
 
     plan = [("ENTRY", number(chart["price"]), TEXT), ("STOP", number(round(chart["price"] * 1.08)), DOWN),
             ("TARGET", number(round(chart["price"] * 0.86)), UP), ("R : R", "1,68", TEXT)]
@@ -338,7 +338,7 @@ def main() -> int:
     for tag in tags:
         w = width_of(tag, "mono", 7.5) + 14
         draw.rounded_rectangle([tx * SCALE, 508 * SCALE, (tx + w) * SCALE, 528 * SCALE],
-                               radius=7 * SCALE, outline=LINE_STRONG, width=SCALE)
+                               radius=2 * SCALE, outline=LINE_STRONG, width=SCALE)
         text((tx + 7, 514), tag, "mono", 7.5, MUTED)
         tx += w + 6
 
@@ -371,16 +371,16 @@ def main() -> int:
             text((bx + 16, 744), headline[38:], "regular", 8.5, MUTED)
         track_w = 248
         draw.rounded_rectangle([(bx + 16) * SCALE, 790 * SCALE, (bx + 16 + track_w) * SCALE,
-                                796 * SCALE], radius=3 * SCALE, fill=PANEL_2)
+                                796 * SCALE], radius=2 * SCALE, fill=PANEL_2)
         fill_w = min(track_w, abs(score) / 2 * (track_w / 2))
         offset = (track_w - fill_w) / 2 if score < 0 else track_w / 2
         if fill_w > 0:
             draw.rounded_rectangle([(bx + 16 + offset) * SCALE, 790 * SCALE,
                                     (bx + 16 + offset + fill_w) * SCALE, 796 * SCALE],
-                                   radius=3 * SCALE, fill=colour)
+                                   radius=2 * SCALE, fill=colour)
         tag_w = width_of(source, "mono", 7) + 12
         draw.rounded_rectangle([(bx + 16) * SCALE, 818 * SCALE, (bx + 16 + tag_w) * SCALE,
-                                836 * SCALE], radius=6 * SCALE, outline=LINE_STRONG, width=SCALE)
+                                836 * SCALE], radius=2 * SCALE, outline=LINE_STRONG, width=SCALE)
         text((bx + 22, 823), source, "mono", 7, ACCENT if source == "IDX" else MUTED)
 
     text((34, 906), "Pratinjau dihasilkan tools/make_preview.py dari data pasar sungguhan — "

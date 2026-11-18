@@ -50,11 +50,11 @@ def _requested_symbol(raw) -> str:
     value = str(raw or "").strip().upper()
     if not value:
         return ""
-    if value == "IHSG":
+    if value in ("IHSG", "IHSG.JK"):
         return market.BENCHMARK
     if value.isalpha() and len(value) != 4:
         raise BadRequest(
-            f"kode IDX harus empat huruf (mis. BBCA), bukan '{value}'; "
+            f"Kode IDX harus empat huruf (mis. BBCA), bukan '{value}'; "
             "untuk simbol lain sertakan akhiran, mis. BTC-USD"
         )
     return market.normalise(value)
@@ -85,7 +85,7 @@ def _analysis_job(job_id: str, *, updates: dict | None = None) -> dict | None:
         if job.get("status") == "running" and now - job.get("updated_at", now) > 600:
             job.update({"status": "error", "stage": "error",
                         "message": "Proses analisis berhenti atau server dimulai ulang.",
-                        "error": "status analisis kedaluwarsa"})
+                        "error": "Status analisis kedaluwarsa"})
             job["updated_at"] = now
         if updates:
             job.update(updates)
@@ -127,10 +127,7 @@ def quotes(symbols: list[str]) -> list[dict]:
 
 
 def _price_of(symbol: str, fallback: float) -> float:
-    try:
-        return market.chart(symbol, "1mo")["price"]
-    except market.MarketError:
-        return fallback
+    return market.last_price(symbol, fallback)
 
 
 def portfolio_view() -> dict:
@@ -211,7 +208,7 @@ def simulate_latest(symbol: str, analysis_id: str, lots, capital, fee_rate_pct=N
     """Calculate against the exact latest server-held machine plan for a symbol."""
     symbol = market.normalise(symbol)
     if not symbol:
-        return 400, {"error": "symbol is required"}
+        return 400, {"error": "Kode saham wajib diisi"}
     with _ANALYSIS_LOCK:
         analysis = _LATEST_ANALYSES.get(symbol)
     if not analysis:
@@ -243,6 +240,24 @@ def _background_analysis(job_id: str, symbol: str, holding: int, range_: str,
             traceback.print_exc()
         _analysis_job(job_id, updates={"status": "error", "stage": "error",
                                        "message": f"Analisis gagal: {exc}", "error": str(exc)})
+
+
+def _startup_settle() -> None:
+    """Score decisions whose holding window has already traded.
+
+    The journal button stays for an explicit re-run, but waiting for a human to
+    notice it left 42 ready decisions pending for weeks — a track record that
+    never materialised. Same deterministic calculation as /api/settle. Kept off
+    the startup path so an offline price source cannot delay the dashboard.
+    """
+    try:
+        result = journal.settle_all()
+        done = len(result.get("settled", []))
+        if done:
+            print(f"  jurnal     {done} keputusan lama dinilai otomatis")
+            sys.stdout.flush()
+    except Exception:  # noqa: BLE001 — boot must survive a broken price feed
+        pass
 
 
 def health() -> dict:
@@ -378,7 +393,7 @@ class Handler(BaseHTTPRequestHandler):
         job_id = self._query().get("id") or ""
         job = _analysis_job(job_id)
         if job is None:
-            return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
+            return self._error("Status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
         if job["status"] == "error":
             return self._error(job.get("error") or "analisis gagal", 500)
         if job["status"] != "complete":
@@ -396,19 +411,19 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = self._query().get("id") or ""
                 job = _analysis_job(job_id)
                 if job is None:
-                    return self._error("status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
+                    return self._error("Status analisis tidak ditemukan atau sudah kedaluwarsa", 404)
                 return self._json({key: value for key, value in job.items() if key not in ("result", "error")})
             if route == "/api/analyze/result":
                 return self._analysis_result()
             if route.startswith("/api/analyze/"):
-                return self._error("unknown endpoint", 404)
+                return self._error("Endpoint tidak dikenal", 404)
             if route == "/api/watchlist":
                 symbols = store.watchlist()
                 return self._json({"symbols": symbols, "quotes": quotes(symbols)})
             if route == "/api/market":
                 symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 payload = market.snapshot(
                     symbol,
                     self._query().get("range") or "6mo",
@@ -418,12 +433,12 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/tick":
                 symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 return self._json(market.tick(symbol))
             if route == "/api/stream":
                 symbol = _requested_symbol(self._query().get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 return self._stream(symbol)
             if route == "/api/benchmark":
                 payload = market.snapshot(market.BENCHMARK, "3mo")
@@ -446,28 +461,28 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/decision":
                 identifier = self._query().get("id")
                 if not identifier:
-                    return self._error("id is required")
+                    return self._error("ID wajib diisi")
                 entry = store.decision(int(identifier))
                 if entry is None:
-                    return self._error("keputusan tidak ditemukan", 404)
+                    return self._error("Keputusan tidak ditemukan", 404)
                 return self._json(entry)
             if route == "/api/portfolio":
                 return self._json(portfolio_view())
             if route == "/api/idx":
                 return self._idx(self._query())
             if route.startswith("/api/"):
-                return self._error("unknown endpoint", 404)
+                return self._error("Endpoint tidak dikenal", 404)
             return self._static(route)
         except BadRequest as exc:
             return self._error(str(exc), 400)
         except market.MarketError as exc:
             return self._error(str(exc), 502)
         except ValueError:
-            return self._error("nilai tidak valid pada permintaan", 400)
+            return self._error("Nilai tidak valid pada permintaan", 400)
         except Exception:                                          # noqa: BLE001
             if os.environ.get("KATALIS_LOG"):
                 traceback.print_exc()
-            return self._error("terjadi kesalahan internal di server; "
+            return self._error("Terjadi kesalahan internal di server; "
                                "jalankan dengan KATALIS_LOG=1 untuk detail", 500)
 
     def do_POST(self) -> None:                                   # noqa: N802
@@ -488,16 +503,16 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(incoming, str):
                     incoming = [incoming]
                 if not incoming:
-                    return self._error("add at least one symbol")
+                    return self._error("Tambahkan minimal satu simbol")
                 symbols = [s for s in (_requested_symbol(item) for item in incoming) if s]
                 if not symbols:
-                    return self._error("add at least one symbol")
+                    return self._error("Tambahkan minimal satu simbol")
                 return self._json({"symbols": store.add_watch(symbols)})
 
             if route == "/api/analyze":
                 symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 holding = int(body.get("holding_days") or 5)
                 want_ai = body.get("ai")
                 if want_ai is None:
@@ -508,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/analyze/start":
                 symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 job_id = uuid.uuid4().hex
                 holding = int(body.get("holding_days") or 5)
                 want_ai = body.get("ai")
@@ -532,11 +547,19 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/screen":
                 # Slow by nature: one Yahoo request per ticker, idx lookups for the shortlist,
                 # and at most one model call. `ai` omitted = use the model if one is configured.
-                symbols = body.get("symbols") or []
-                if isinstance(symbols, str):
-                    symbols = [symbols]
-                symbols = [_requested_symbol(str(item)) for item in symbols]
-                return self._json(screener.screen(
+                raw_symbols = body.get("symbols") or []
+                if isinstance(raw_symbols, str):
+                    raw_symbols = [raw_symbols]
+                symbols, invalid = [], []
+                for item in raw_symbols:
+                    try:
+                        symbols.append(_requested_symbol(str(item)))
+                    except BadRequest as exc:
+                        invalid.append({"symbol": str(item), "error": str(exc)})
+                if raw_symbols and not symbols:
+                    return self._error("Tidak ada kode saham yang valid: "
+                                       + "; ".join(item["error"] for item in invalid))
+                result = screener.screen(
                     symbols or None,
                     max_picks=int(body.get("max_picks") or 5),
                     shortlist=int(body.get("shortlist") or 30),
@@ -544,7 +567,10 @@ class Handler(BaseHTTPRequestHandler):
                     ai=body.get("ai"),
                     record=bool(body.get("record")),
                     holding_days=int(body.get("holding_days") or 5),
-                ))
+                )
+                if invalid:
+                    result["errors"] = invalid + result.get("errors", [])
+                return self._json(result)
 
             if route == "/api/simulate":
                 code, result = simulate_latest(_requested_symbol(body.get("symbol") or ""),
@@ -559,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/portfolio":
                 symbol = _requested_symbol(body.get("symbol") or "")
                 if not symbol:
-                    return self._error("symbol is required")
+                    return self._error("Kode saham wajib diisi")
                 quantity = float(body.get("quantity") or 0)
                 average = float(body.get("avg_price") or 0)
                 store.set_position(symbol, quantity, average)
@@ -569,17 +595,17 @@ class Handler(BaseHTTPRequestHandler):
                 store.set_cash(float(body.get("value") or 0))
                 return self._json(portfolio_view())
 
-            return self._error("unknown endpoint", 404)
+            return self._error("Endpoint tidak dikenal", 404)
         except BadRequest as exc:
             return self._error(str(exc), 400)
         except market.MarketError as exc:
             return self._error(str(exc), 502)
         except ValueError:
-            return self._error("nilai tidak valid pada permintaan", 400)
+            return self._error("Nilai tidak valid pada permintaan", 400)
         except Exception:                                          # noqa: BLE001
             if os.environ.get("KATALIS_LOG"):
                 traceback.print_exc()
-            return self._error("terjadi kesalahan internal di server; "
+            return self._error("Terjadi kesalahan internal di server; "
                                "jalankan dengan KATALIS_LOG=1 untuk detail", 500)
 
     def _stream(self, symbol: str) -> None:
@@ -659,6 +685,7 @@ def main() -> None:
             pass
 
     store.init()
+    threading.Thread(target=_startup_settle, name="journal-settle", daemon=True).start()
     desired = 8770
     host = "127.0.0.1"
     for index, arg in enumerate(sys.argv):

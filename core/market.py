@@ -41,7 +41,7 @@ INTRADAY = ("1d", "5d")
 # A cached payload written by an older build may lack fields this one reads
 # (interval, for one). Bump on any shape change so stale files are re-fetched
 # instead of raising KeyError deep inside a request.
-_CACHE_SCHEMA = 2
+_CACHE_SCHEMA = 3
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -55,7 +55,7 @@ def safe_symbol(symbol: str) -> str:
     """Reject anything that could escape the cache directory."""
     cleaned = "".join(c for c in str(symbol).strip().upper() if c.isalnum() or c in ".^=+-_")
     if not cleaned or set(cleaned) == {"."}:
-        raise MarketError(f"not a usable symbol: {symbol!r}")
+        raise MarketError(f"Simbol tidak valid: {symbol!r}")
     return cleaned
 
 
@@ -90,13 +90,13 @@ def _get(url: str, timeout: float = 20.0) -> dict:
             if exc.code == 429 and attempt < 2:
                 time.sleep(1.2 * (attempt + 1))
                 continue
-            raise MarketError(f"Yahoo answered HTTP {exc.code} for {url.split('?')[0]}") from exc
+            raise MarketError(f"Yahoo menjawab HTTP {exc.code} untuk {url.split('?')[0]}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             if attempt < 2:
                 time.sleep(0.8 * (attempt + 1))
                 continue
-            raise MarketError(f"could not reach the price source: {exc}") from exc
-    raise MarketError(f"could not reach the price source for {url.split('?')[0]}")
+            raise MarketError(f"Tidak dapat menjangkau sumber harga: {exc}") from exc
+    raise MarketError(f"Tidak dapat menjangkau sumber harga untuk {url.split('?')[0]}")
 
 
 def chart(symbol: str, range_: str = _DEFAULT_RANGE, *, fresh: bool = False,
@@ -131,7 +131,7 @@ def chart(symbol: str, range_: str = _DEFAULT_RANGE, *, fresh: bool = False,
     result = (raw.get("chart") or {}).get("result") or []
     if not result:
         detail = (raw.get("chart") or {}).get("error") or {}
-        raise MarketError(f"no data for {symbol}" + (f": {detail.get('description')}" if detail else ""))
+        raise MarketError(f"Tidak ada data untuk {symbol}" + (f": {detail.get('description')}" if detail else ""))
 
     payload = _parse(result[0], symbol, range_, interval)
     try:
@@ -159,7 +159,7 @@ def _previous_close(bars: list, interval: str):
         while index > 0 and _session_day(bars[index - 1]["t"]) == day:
             index -= 1
         return bars[index - 1]["c"] if index > 0 else None
-    return bars[-2]["c"] if len(bars) > 1 else bars[-1]["c"]
+    return bars[-2]["c"] if len(bars) > 1 else None
 
 
 def _parse(node: dict, symbol: str, range_: str, interval: str) -> dict:
@@ -183,7 +183,7 @@ def _parse(node: dict, symbol: str, range_: str, interval: str) -> dict:
             "v": float(_at(volumes, index) or 0.0),
         })
     if not bars:
-        raise MarketError(f"no priced bars for {symbol}")
+        raise MarketError(f"Tidak ada bar harga untuk {symbol}")
 
     price = meta.get("regularMarketPrice")
     return {
@@ -195,7 +195,10 @@ def _parse(node: dict, symbol: str, range_: str, interval: str) -> dict:
         "range": range_,
         "interval": interval,
         "price": float(price) if price is not None else bars[-1]["c"],
-        "prev_close": _num(meta.get("chartPreviousClose")) or _previous_close(bars, interval),
+        # chartPreviousClose is the close before the RANGE started, not before
+        # the last session. On a 6mo chart it is six months old, so the UI's
+        # "previous close" line pointed at the first bar instead of yesterday.
+        "prev_close": _previous_close(bars, interval) or _num(meta.get("chartPreviousClose")),
         "timezone": meta.get("exchangeTimezoneName") or "Asia/Jakarta",
         "bars": bars,
         "fetched_at": int(time.time()),
@@ -406,6 +409,18 @@ def snapshot(symbol: str, range_: str = _DEFAULT_RANGE, *, fresh: bool = False) 
     payload = chart(symbol, range_, fresh=fresh)
     payload["indicators"] = indicators(payload["bars"])
     return payload
+
+
+def last_price(symbol: str, fallback: float = 0.0) -> float:
+    """One cached quote for position sizing, or ``fallback`` if Yahoo is down.
+
+    Cost basis is not equity: a lot bought at 1.000 now trading at 2.000 has
+    twice the risk budget. Both /api/analyze and the screener size from this.
+    """
+    try:
+        return chart(symbol, "1mo")["price"]
+    except MarketError:
+        return fallback
 
 
 def tick(symbol: str) -> dict:

@@ -100,11 +100,55 @@ Sudah:
   `simulation.calculate` satu-satunya jalur simulasi.
 - Watchlist dan penyelesaian jurnal mengambil harga paralel; pemindai memakai ekuitas
   tersimpan (lot tidak lagi kosong) dan menerima `max_candidates` dari API.
+- Penilaian jurnal juga dijalankan otomatis di background saat `app.main()` start, supaya
+  keputusan yang sudah jatuh tempo tidak menumpuk menunggu tombol ditekan (`_startup_settle`).
+- `journal._dated_bars` membuang bar volume 0. Yahoo menyimpan harga lama pada bar sesi
+  yang belum diperdagangkan; tanpa filter ini alpha bisa dihitung dari hari yang tidak
+  bisa ditransaksikan (MKNT.JK dan TMPO.JK menjadi contoh nyata).
 - UI: fallback server lama memakai status 404, bukan teks pesan; tab punya
   `aria-controls`/`aria-labelledby`; watchlist tidak direbuild bila markup sama; poll
   berhenti saat tab tersembunyi.
-- Verifikasi: `tools/test_pure.py` 123/123, `tools/test_pure.mjs` 50/50, plus probe
+- Verifikasi: `tools/test_pure.py` 132/132, `tools/test_pure.mjs` 51/51, plus probe
   HTTP langsung (400/403/413/415, traversal 404, SSE/tick/benchmark).
+
+## Audit 18-11-2026: delapan bug runtime
+
+Semua ditemukan dengan mereproduksinya, lalu ada tes regresinya:
+
+- `journal.settle_all` mengambil keluar di `sessions[window]` (sesi ke-6 untuk
+  `holding_days=5`); sekarang `sessions[window - 1]` sesuai README. Baris yang sudah
+  dinilai dengan angka lama di-reset dan dihitung ulang; jadi jangan mengira alpha lama
+  masih berlaku.
+- `IHSG.JK` (hasil normalisasi UI) tidak pernah dipetakan ke `^JKSE`; sekarang server
+  dan `web/app.js` memetakan keduanya.
+- `prev_close` memakai `meta.chartPreviousClose` = close sebelum **rentang** mulai, jadi
+  garis "penutupan sebelumnya" di chart menunjuk harga enam bulan lalu. Sekarang
+  dihitung dari `bars[-2]`; cache schema naik ke 3.
+- Rating model yang tidak dikenali dulu diam-diam diganti rating mesin dan tetap
+  dilaporkan sebagai setuju. Sekarang `advisor.advise` gagal dengan `LLMError` sehingga
+  `ai.error` menjelaskan dan kolom AI jurnal tidak berbohong.
+- Ticker karangan di `pilihan` pemindai tidak masuk `ai.dropped`; sekarang dilaporkan.
+- Pemindai menghitung ukuran posisi dari harga beli, bukan harga pasar; sekarang
+  `market.last_price()` dipakai bersama `/api/analyze`.
+- Satu kode invalid di kolom pemindai menggagalkan seluruh request (400); sekarang token
+  buruk disaring di UI dan dilaporkan per saham di `errors` API.
+- Slot "5 top gainer" dalam dokumentasi sekarang dibaca sebagai "5 top gainer di antara
+  saham yang lolos gerbang lapis 1" — sama dengan perilaku kode.
+
+## Tindak lanjut 18-11-2026 (permintaan pemilik)
+
+- `.env` sekarang memakai `OPENAI_MODEL=deepseek-v4.1-flash-1017` lewat gateway SumoPod.
+  Satu panggilan nyata: **4,3 dtk**, 0 reasoning token, JSON valid, level tetap dari
+  mesin. Model lama `glm-5.3-flash` memakai 1,1–3,9 rb token reasoning dan bisa 60–105 dtk.
+- `tools/daily.py` — satu perintah harian: pemindai `record=True` tanpa AI (gratis), lalu
+  `journal.settle_all()`. Jadwalkan lewat cron/Task Scheduler. Ini jalan pengumpulan
+  sampel; jangan ubah bobot/ambang sebelum ~96 keputusan berarah terkumpul.
+- `store._score_rows` menyimpan `alpha_stddev` dan `ci95_halfwidth`; tab Jurnal menampilkan
+  margin kesalahan 95% supaya hit rate dari sampel kecil tidak disalahartikan.
+- Gerbang sistem pemindai (`screener._system_gate`) sekarang memakai konstanta
+  `guidance.MAX_ATR_PCT` (7%), `guidance.MIN_REWARD_RISK` (1:1), dan minimal 3 peran.
+  Pengecekan kesegaran tetap di lapis 1 karena ia memakai tanggal `today` dari pemanggil,
+  bukan jam dinding. Lapis 1 sengaja tetap inklusif untuk saham murah/tipis.
 
 ## Batas yang diketahui
 

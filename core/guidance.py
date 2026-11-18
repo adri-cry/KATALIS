@@ -22,6 +22,11 @@ _INTRADAY = {"1d", "5d"}
 _DAILY = {"1mo", "3mo", "6mo", "1y", "2y"}
 _MIN_ROLES = 3
 _MIN_SESSIONS = 20
+# The same limits are used by the dashboard's "high risk" flag and by the
+# screener's system gate. One source of truth: a stock cannot be picked by the
+# screener and then shown as "Tunggu, risiko tinggi" on the dashboard.
+MAX_ATR_PCT = 7.0
+MIN_REWARD_RISK = 1.0
 
 
 def _number(value) -> float | None:
@@ -93,12 +98,12 @@ def build(analysis: dict) -> dict:
     plan = analysis.get("trader") or {}
     atr_pct = _number(indicators.get("atr_pct"))
     reward_risk = _number(plan.get("reward_risk"))
-    high_risk = bool((atr_pct is not None and atr_pct > 7.0)
-                     or (reward_risk is not None and reward_risk < 1.0))
+    high_risk = bool((atr_pct is not None and atr_pct > MAX_ATR_PCT)
+                     or (reward_risk is not None and reward_risk < MIN_REWARD_RISK))
     risk_flags = []
-    if atr_pct is not None and atr_pct > 7.0:
-        risk_flags.append(f"ATR {atr_pct:.2f}% melewati batas volatilitas pemindai 7%")
-    if reward_risk is not None and reward_risk < 1.0:
+    if atr_pct is not None and atr_pct > MAX_ATR_PCT:
+        risk_flags.append(f"ATR {atr_pct:.2f}% melewati batas volatilitas {MAX_ATR_PCT:.0f}%")
+    if reward_risk is not None and reward_risk < MIN_REWARD_RISK:
         risk_flags.append(f"R:R {reward_risk:.2f}:1 kurang dari risiko 1 banding 1")
 
     conflicts = []

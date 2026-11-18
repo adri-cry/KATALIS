@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import advisor, desk, llm, market, store
+from . import advisor, desk, guidance, llm, market, store
 
 ROOT = Path(__file__).resolve().parent.parent
 UNIVERSE_FILE = ROOT / "data" / "universe.txt"
@@ -209,6 +209,33 @@ def _brief(analysis: dict) -> dict:
     }
 
 
+def _system_gate(analysis: dict) -> list[str]:
+    """Rules the dashboard enforces too, checked after the desk has full data.
+
+    Layer 1 stays inclusive on purpose (cheap and thin stocks still get a read),
+    so these limits are applied here, where ATR, R:R and data completeness are
+    known. They come from ``guidance`` so a pick can never be shown as
+    "Tunggu, risiko tinggi" on the dashboard.
+    """
+    guide = guidance.build(analysis)
+    quality = guide.get("data_quality") or {}
+    risk = guide.get("risk") or {}
+    reasons: list[str] = []
+    minimum = quality.get("policy_min_available_roles", 3)
+    available = quality.get("available_roles", 0)
+    if available < minimum:
+        reasons.append(f"baru {available} peran punya data; butuh minimal {minimum}")
+    # Freshness is already checked in layer 1 against ``today`` (the caller's
+    # clock). guidance.build uses the wall clock and must not second-guess it.
+    atr = risk.get("atr_pct")
+    if atr is not None and atr > guidance.MAX_ATR_PCT:
+        reasons.append(f"ATR {atr:.2f}% melebihi batas {guidance.MAX_ATR_PCT:.0f}%")
+    rr = risk.get("reward_risk")
+    if rr is not None and rr < guidance.MIN_REWARD_RISK:
+        reasons.append(f"R:R {rr:.2f}:1 di bawah batas {guidance.MIN_REWARD_RISK:.0f}:1")
+    return reasons
+
+
 def _conviction(value) -> float:
     try:
         return round(max(0.0, min(1.0, float(value))), 2)
@@ -248,7 +275,14 @@ def apply_model(symbols: list[str], raw: dict, max_picks: int) -> tuple[dict, li
     for entry in raw.get("pilihan") or []:
         symbol = market.normalise(str(entry or ""))
         verdict = verdicts.get(symbol)
-        if verdict and verdict["rating"] in BUYABLE and symbol not in picks:
+        if not verdict:
+            # A pick that has no verdict was never shown to the model as a
+            # candidate (or the model invented it). Report it like any other
+            # invented ticker instead of silently ignoring it.
+            if symbol and symbol not in dropped:
+                dropped.append(symbol)
+            continue
+        if verdict["rating"] in BUYABLE and symbol not in picks:
             picks.append(symbol)
     return verdicts, picks[:max(0, max_picks)], dropped
 
@@ -395,8 +429,12 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
 
     # -- stage 2: the full desk, only for the shortlist ----------------------
     # Size lots from the stored portfolio: at equity 0 the plan cannot compute a
-    # position and every candidate came back with "isi nilai portofolio".
-    equity = store.cash() + sum(row["quantity"] * row["avg_price"] for row in store.positions())
+    # position and every candidate came back with "isi nilai portofolio". Use
+    # current market prices, not cost basis — the same equity /api/analyze uses.
+    positions = store.positions()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        prices = list(pool.map(lambda p: market.last_price(p["symbol"], p["avg_price"]), positions))
+    equity = store.cash() + sum(p["quantity"] * price for p, price in zip(positions, prices))
     analyses: list[dict] = []
     for symbol, analysis, error in _in_pool(
             lambda s: desk.analyse(s, range_, holding_days, equity=equity), short, min(workers, 2)):
@@ -407,6 +445,10 @@ def screen(symbols: list[str] | None = None, *, max_picks: int = 5, shortlist: i
         if rating not in BUYABLE:
             rejected.append({"symbol": symbol, "stage": "mesin", "reasons": [
                 f"rating mesin {rating} (komposit {analysis['manager']['composite']:+.2f})"]})
+            continue
+        reasons = _system_gate(analysis)
+        if reasons:
+            rejected.append({"symbol": symbol, "stage": "sistem", "reasons": reasons})
             continue
         analyses.append(analysis)
     analyses.sort(key=lambda a: a["manager"]["composite"], reverse=True)

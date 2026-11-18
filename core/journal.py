@@ -24,8 +24,13 @@ WIB = timezone(timedelta(hours=7))
 
 def _dated_bars(symbol: str) -> dict[str, dict]:
     payload = market.chart(symbol, "2y")
+    # Yahoo keeps a placeholder bar for a session that has not traded yet: the
+    # price is carried over but volume is 0 (IHSG on 2026-11-18, MKNT.JK from
+    # 2026-11-06 onward). Such a bar is not a session — settling on it books a
+    # return for a day nobody could have traded. Drop it on both sides, stock
+    # and benchmark, so entry and exit always name real traded sessions.
     return {datetime.fromtimestamp(bar["t"], WIB).strftime("%Y-%m-%d"): bar
-            for bar in payload["bars"]}
+            for bar in payload["bars"] if (bar.get("v") or 0) > 0}
 
 
 def _close_on_or_before(bars: dict[str, dict], day: str) -> float | None:
@@ -70,12 +75,15 @@ def settle_all(holding_days: int | None = None) -> dict:
 
         sessions = sorted(day for day in bars if day > row["trade_date"])
         window = int(holding_days or row["holding_days"] or 5)
-        if len(sessions) <= window:
+        if len(sessions) < window:
             waiting.append({"symbol": symbol, "date": row["trade_date"],
                             "reason": f"jendela {window} sesi belum terlewati"})
             continue
 
-        entry_day, exit_day = sessions[0], sessions[window]
+        # sessions[0] is the first close after the decision; the exit is the
+        # close of the window-th session, i.e. sessions[window - 1]. Using
+        # sessions[window] held for one extra session and inflated every alpha.
+        entry_day, exit_day = sessions[0], sessions[window - 1]
         entry_price, exit_price = bars[entry_day]["c"], bars[exit_day]["c"]
         benchmark_entry = _close_on_or_before(benchmark, entry_day)
         benchmark_exit = _close_on_or_before(benchmark, exit_day)

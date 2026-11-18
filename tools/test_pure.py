@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import advisor, desk, guidance, llm, market, screener, simulation, store  # noqa: E402
+from core import advisor, desk, guidance, journal, llm, market, screener, simulation, store  # noqa: E402
 import app as app_module  # noqa: E402
 
 CHECKS: list[tuple[str, bool, str]] = []
@@ -107,6 +107,21 @@ check("harga: prev_close intraday = close sesi sebelumnya",
 check("harga: prev_close harian tetap bar sebelumnya",
       market._previous_close(bars_from([1.0, 2.0, 3.0]), "1d") == 2.0)
 
+# Yahoo's chartPreviousClose is the close before the RANGE began, not yesterday.
+_daily = bars_from([100.0, 105.0, 110.0])
+_parsed = market._parse({
+    "meta": {"symbol": "TEST.JK", "currency": "IDR", "regularMarketPrice": 110.0,
+             "chartPreviousClose": 42.0},
+    "timestamp": [bar["t"] for bar in _daily],
+    "indicators": {"quote": [{"open": [b["o"] for b in _daily],
+                              "high": [b["h"] for b in _daily],
+                              "low": [b["l"] for b in _daily],
+                              "close": [b["c"] for b in _daily],
+                              "volume": [b["v"] for b in _daily]}]},
+}, "TEST.JK", "6mo", "1d")
+check("harga: garis penutupan sebelumnya tidak memakai close awal rentang",
+      _parsed["prev_close"] == 105.0, str(_parsed["prev_close"]))
+
 # ---- durable-in-process analysis job registry --------------------------------
 app_module._ANALYSIS_JOBS.clear()
 app_module._ANALYSIS_JOBS["unit-job"] = {"id": "unit-job", "status": "running", "stage": "ai",
@@ -123,6 +138,8 @@ app_module._ANALYSIS_JOBS.clear()
 # ---- ticker input validation -------------------------------------------------
 check("simbol: empat huruf menjadi listing IDX", app_module._requested_symbol("bbca") == "BBCA.JK")
 check("simbol: IHSG dipetakan ke benchmark", app_module._requested_symbol("IHSG") == market.BENCHMARK)
+check("simbol: IHSG.JK juga dipetakan ke benchmark",
+      app_module._requested_symbol("IHSG.JK") == market.BENCHMARK)
 check("simbol: akhiran eksplisit diteruskan", app_module._requested_symbol("btc-usd") == "BTC-USD")
 rejected = False
 try:
@@ -461,6 +478,20 @@ try:
 finally:
     llm.status, llm.chat_json = real_status_for_advisor, real_chat_for_advisor
 
+# A rating the model never returned must not be recorded as its opinion.
+try:
+    llm.status = lambda: {"configured": True}
+    llm.chat_json = lambda *_args, **_kwargs: {"rating": "Sangat Buy", "conviction": 0.9}
+    bogus_rejected = False
+    try:
+        advisor.advise({"decision": {"rating": "Hold"}, "trader": {},
+                        "symbol": "TEST.JK", "indicators": {}, "roles": []})
+    except llm.LLMError:
+        bogus_rejected = True
+    check("advisor: rating ngawur dari model gagal, bukan jadi rating mesin", bogus_rejected)
+finally:
+    llm.status, llm.chat_json = real_status_for_advisor, real_chat_for_advisor
+
 # Snapshot-bound API helper: only the exact current analysis may be simulated.
 original_latest, original_analysis_id = app_module._LATEST_ANALYSES, "analysis-snapshot-1"
 try:
@@ -575,7 +606,8 @@ verdicts, picks, dropped = screener.apply_model(shown, {
         {"kode": "GHOST.JK", "rating": "Buy", "conviction": 0.9},
     ],
     "pilihan": ["GHOST.JK", "BBBB.JK", "CCCC.JK", "AAAA.JK", "AAAA.JK"]}, 5)
-check("model: kode karangan dibuang dan dilaporkan", dropped == ["GHOST.JK"], str(dropped))
+check("model: kode karangan di kandidat dan di pilihan dilaporkan",
+      dropped == ["GHOST.JK", "CCCC.JK"], str(dropped))
 check("model: pilihan berating Hold atau tak dikenal dicoret", picks == ["AAAA.JK"], str(picks))
 check("model: keyakinan dijepit ke 0..1 dan yang rusak jadi 0,5",
       verdicts["AAAA.JK"]["conviction"] == 1.0 and verdicts["BBBB.JK"]["conviction"] == 0.5)
@@ -670,6 +702,53 @@ try:
     check("tanpa kandidat: model tidak dipanggil dan tidak ada pilihan",
           len(calls) == before and res["picks"] == [], str(res["picks"]))
 
+    # the screener now enforces the same risk policy as the dashboard
+    real_build = screener.guidance.build
+
+    def strict_build(analysis):
+        guide = real_build(analysis)
+        if analysis["symbol"] == "UPAA.JK":
+            guide["risk"]["atr_pct"] = 9.0
+        if analysis["symbol"] == "UPBB.JK":
+            guide["risk"]["reward_risk"] = 0.8
+        if analysis["symbol"] == "CHEP.JK":
+            guide["data_quality"]["available_roles"] = 2
+        return guide
+
+    screener.guidance.build = strict_build
+    try:
+        gated = screener.screen(SCREEN_UNIVERSE, ai=False, today=TODAY)
+    finally:
+        screener.guidance.build = real_build
+    stages = {item["symbol"]: item["stage"] for item in gated["rejected"]}
+    check("pemindai: ATR, R:R, dan jumlah peran memakai batas guidance yang sama",
+          all(stages.get(symbol) == "sistem" for symbol in ("UPAA.JK", "UPBB.JK", "CHEP.JK")),
+          str(stages))
+
+    # sizing must use current market equity, not the cost basis of open lots
+    with tempfile.TemporaryDirectory() as tmp:
+        store.DB_PATH = Path(tmp) / "equity.db"
+        store.init()
+        store.set_cash(10_000_000)
+        store.set_position("UPAA.JK", 1000, 1000.0)
+        seen_equity: list[float] = []
+        real_analyse = screener.desk.analyse
+
+        def spy_analyse(symbol, range_, holding_days, equity=0.0):
+            seen_equity.append(equity)
+            return real_analyse(symbol, range_, holding_days, equity=equity)
+
+        screener.desk.analyse = spy_analyse
+        try:
+            screener.screen(["UPAA.JK"], ai=False, today=TODAY)
+        finally:
+            screener.desk.analyse = real_analyse
+            store.DB_PATH = real_db
+        expected = 10_000_000 + 1000 * SCREEN_TABLE["UPAA.JK"][-1]["c"]
+        check("pemindai: ukuran posisi memakai ekuitas harga pasar, bukan modal beli",
+              bool(seen_equity) and abs(seen_equity[0] - expected) < 0.01,
+              f"{seen_equity} != {expected}")
+
     # journal: picks are written in the shape the dashboard reads, once per day
     with tempfile.TemporaryDirectory() as tmp:
         store.DB_PATH = Path(tmp) / "test.db"
@@ -725,6 +804,51 @@ try:
               len(store.journal()) == 8, str(len(store.journal())))
 finally:
     store.DB_PATH = real_db
+
+# ---- journal sample size is reported, not hidden behind a point estimate ----
+_scored = store._score_rows(
+    [{"rating": "Buy", "alpha": 0.01}, {"rating": "Buy", "alpha": 0.03}], "rating")
+check("jurnal: metrik menyimpan simpangan dan margin kesalahan 95%",
+      math.isfinite(_scored["Buy"]["alpha_stddev"])
+      and math.isfinite(_scored["Buy"]["ci95_halfwidth"])
+      and _scored["Buy"]["ci95_halfwidth"] > 0, str(_scored))
+
+# ---- settlement: a placeholder bar is not a trading session ------------------
+# Yahoo carries the last price into a bar with volume 0 when a session has not
+# traded (or a stock is suspended). Counting it as session five books a return
+# for a day nobody could have traded.
+try:
+    traded_then_halted = bars_from([100.0] * 15, [1_000_000.0] * 5 + [0.0] * 10)
+    traded_then_closed = bars_from([100.0] * 15, [1_000_000.0] * 11 + [0.0] * 4)
+    fake_charts = {
+        "STUCK.JK": {"bars": traded_then_halted},
+        "OK.JK": {"bars": traded_then_closed},
+        market.BENCHMARK: {"bars": bars_from([1000.0] * 15, [5_000_000.0] * 15)},
+    }
+    real_chart, real_pending, real_settle = journal.market.chart, store.pending, store.settle
+    captured: list[tuple] = []
+    journal.market.chart = lambda symbol, range_: fake_charts[symbol]
+    store.pending = lambda: [
+        {"id": 1, "symbol": "STUCK.JK", "trade_date": "2026-01-01",
+         "holding_days": 5, "rating": "Buy"},
+        {"id": 2, "symbol": "OK.JK", "trade_date": "2026-01-01",
+         "holding_days": 5, "rating": "Buy"},
+    ]
+    store.settle = lambda *args: captured.append(args)
+    try:
+        outcome = journal.settle_all()
+        check("jurnal: sesi volume-0 tidak dihitung sebagai sesi kelima",
+              len(outcome["settled"]) == 1 and outcome["settled"][0]["symbol"] == "OK.JK",
+              str(outcome))
+        check("jurnal: keluar tepat pada sesi ke-5, bukan sesi ke-6",
+              outcome["settled"][0]["exit_date"] == "2026-01-06"
+              and len(outcome["waiting"]) == 1, str(outcome))
+        check("jurnal: saham suspended tetap menunggu, bukan dinilai",
+              outcome["waiting"][0]["symbol"] == "STUCK.JK", str(outcome))
+    finally:
+        journal.market.chart, store.pending, store.settle = real_chart, real_pending, real_settle
+except Exception as exc:  # noqa: BLE001 — a broken fixture must fail a check, not the file
+    check("jurnal: pengujian sesi volume-0 berjalan", False, str(exc))
 
 # ---- report -----------------------------------------------------------------
 failed = 0

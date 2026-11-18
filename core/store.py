@@ -8,7 +8,9 @@ worth is an opinion, not a track record.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import statistics
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -240,10 +242,17 @@ def _score_rows(rows, key: str) -> dict:
     scores = {}
     for rating, alphas in grouped.items():
         side = _DIRECTION.get(rating, 0)
+        mean = sum(alphas) / len(alphas)
+        spread = statistics.stdev(alphas) if len(alphas) > 1 else 0.0
+        # A 50% hit rate from 8 trades is not evidence of anything. Carrying the
+        # uncertainty beside the point estimate keeps the journal honest.
+        margin = 1.96 * spread / math.sqrt(len(alphas)) if len(alphas) > 1 else None
         scores[rating] = {
             "count": len(alphas),
             "hit_rate": (sum(1 for a in alphas if a * side > 0) / len(alphas)) if side else None,
-            "mean_alpha": sum(alphas) / len(alphas),
+            "mean_alpha": mean,
+            "alpha_stddev": spread,
+            "ci95_halfwidth": margin,
         }
     return scores
 
@@ -267,6 +276,8 @@ def stats() -> dict:
     by_rating_ai = _score_rows(rows, "ai_rating")
     return {
         "settled": sum(score["count"] for score in by_rating.values()),
+        "directional_count": sum(score["count"] for rating, score in by_rating.items()
+                                 if _DIRECTION.get(rating, 0)),
         "pending": pending_count,
         "by_rating": by_rating,
         "by_rating_ai": by_rating_ai,

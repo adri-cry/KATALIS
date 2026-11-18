@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KATALIS · IDX Intelligence Desk</title>
 <link rel="stylesheet" href="/styles.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f14'/%3E%3Cpath d='M18 44V20M18 32l14-12M18 32l14 12' stroke='%23f0b429' stroke-width='5' stroke-linecap='round' fill='none'/%3E%3Crect x='40' y='22' width='7' height='20' rx='2' fill='%2322c55e'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23f4f1e8'/%3E%3Cpath d='M18 44V20M18 32l14-12M18 32l14 12' stroke='%239a2f2f' stroke-width='5' stroke-linecap='round' fill='none'/%3E%3Crect x='40' y='22' width='7' height='20' fill='%231f6b47'/%3E%3C/svg%3E">
 </head>
 <body>
 <noscript><p class="noscript">Dashboard ini butuh JavaScript: tanpa itu hanya kerangka halaman yang tampil.</p></noscript>
@@ -14,7 +14,7 @@
   <div class="brand">
     <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
       <path d="M18 44V20M18 32l15-13M18 32l15 13" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
-      <rect x="41" y="23" width="7" height="18" rx="2.5" fill="#22c55e"/>
+      <rect x="41" y="23" width="7" height="18" fill="#1f6b47"/>
     </svg>
     <div class="wordmark">
       <h1>KATALIS</h1>
@@ -22,8 +22,8 @@
     </div>
   </div>
   <div class="topmeta">
-    <span class="chip chip-live" id="chip-mode">menghubungkan…</span>
-    <span class="chip" id="chip-idx" title="Data khusus IDX dari biner idx">idx · memeriksa</span>
+    <span class="chip chip-live" id="chip-mode">Menghubungkan…</span>
+    <span class="chip" id="chip-idx" title="Data khusus IDX dari biner idx">IDX · memeriksa</span>
     <span class="chip" id="chip-ai" title="Lapisan penasihat OpenAI">AI · memeriksa</span>
     <div class="ihsg">
       <span class="label">IHSG</span>
@@ -41,8 +41,8 @@
     <button id="analyse" class="primary">Analisis</button>
   </div>
   <div class="opts">
-    <label class="toggle"><input type="checkbox" id="opt-ai" checked> pakai AI</label>
-    <label class="toggle"><input type="checkbox" id="opt-auto"> otomatis saat dibuka</label>
+    <label class="toggle"><input type="checkbox" id="opt-ai" checked> Pakai AI</label>
+    <label class="toggle"><input type="checkbox" id="opt-auto"> Otomatis saat dibuka</label>
     <span class="muted hint">Membuka halaman hanya memuat harga; analisis berjalan saat tombol ditekan.</span>
   </div>
   <div class="quick" id="quick"></div>
@@ -68,7 +68,7 @@
           <h2 id="chart-title">—</h2>
           <span class="chart-price" id="chart-price">—</span>
           <span class="chart-chg" id="chart-chg">—</span>
-          <span class="chart-live" id="chart-live">menyambung</span>
+          <span class="chart-live" id="chart-live">Menyambung</span>
         </div>
         <p id="chart-sub" class="muted">—</p>
       </div>
@@ -89,6 +89,7 @@
     </div>
     <div id="chart" class="chart"><div class="skeleton tall"></div></div>
     <div class="metrics" id="metrics"></div>
+    <div id="decision-sheet" class="decision-sheet" aria-live="polite"></div>
   </section>
 
   <section class="card verdict" id="verdict">
@@ -110,11 +111,11 @@
   <button id="tab-portfolio" data-tab="portfolio" role="tab" aria-selected="false" aria-controls="panel">Portofolio</button>
 </nav>
 <section class="panel" id="panel" role="tabpanel" tabindex="0" aria-labelledby="tab-roles">
-  <p class="muted pad">Jalankan analisis untuk melihat dewan analis bekerja.</p>
+  <p class="muted pad">Jalankan analisis untuk melihat Dewan Analis bekerja.</p>
 </section>
 
 <footer class="foot">
-  <p><strong>KATALIS</strong> menggabungkan dua proyek sumber terbuka: pola dewan analis dari
+  <p><strong>KATALIS</strong> menggabungkan dua proyek sumber terbuka: pola Dewan Analis dari
   <em>TradingAgents</em> (Apache-2.0) dan kedalaman data IDX dari <em>idx</em> (MIT).</p>
   <p class="muted">Mesin ini deterministik dan berjalan di komputer Anda. Hasilnya bukan nasihat investasi;
   data harga dapat tertunda. Selalu periksa sendiri sebelum bertransaksi.</p>
