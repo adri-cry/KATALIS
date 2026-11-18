@@ -164,6 +164,8 @@ Tanpa bot AI. Cron di mesin ini, Senin–Jumat WIB: 07:15 `tools/daily.py`,
 - `report.py` menulis `data/laporan-YYYY-MM-DD.md`, menjalankan `settle_all()`,
   dan mengirim versi pendek ke Telegram lewat `core/notify.py` bila
   `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` terisi. Tanpa itu diam-diam dilewati.
+  Egress mesin ini menolak POST ke api.telegram.org, jadi `notify.send` memakai
+  `sendMessage` lewat GET (query string) — sudah dites terkirim.
 - Dilarang mengubah bobot/Gate sebelum ≥96 keputusan berarah (lihat MANDATE).
 
 ## Batas yang diketahui

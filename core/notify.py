@@ -9,6 +9,7 @@ No token is ever logged.
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 
 from . import llm  # imports the .env loader as a side effect
@@ -26,19 +27,17 @@ def send(text: str) -> tuple[bool, str]:
     if not token or not chat:
         return False, "belum dikonfigurasi"
     try:
-        body = json.dumps({
+        # This machine's egress blocks POST bodies to Telegram but allows GET.
+        # Query-string sendMessage works identically for short plain-text
+        # reports, which is all this notifier sends.
+        query = urllib.parse.urlencode({
             "chat_id": chat,
             "text": str(text)[:MAX_CHARS],
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }).encode("utf-8")
-        request = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:
+            "disable_web_page_preview": "true",
+        })
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/bot{token}/sendMessage?{query}",
+                timeout=20) as response:
             answer = json.loads(response.read().decode("utf-8"))
         if answer.get("ok"):
             return True, "terkirim"
