@@ -184,14 +184,19 @@ tombol **Nilai keputusan yang jatuh tempo** di tab Jurnal tetap ada untuk menjal
 lagi. Bar yang belum diperdagangkan (volume 0, misalnya sesi yang masih berjalan atau
 saham yang dihentikan) tidak dihitung sebagai sesi masuk/keluar.
 
-Untuk mengisi rekam jejak tanpa menunggu klik harian:
+Untuk mengisi rekam jejak tanpa menunggu klik harian, tiga skrip dijalankan cron
+(Senin–Jumat, WIB). Jadwal dan aturannya dikunci di `MANDATE.md`:
 
-```bash
-python tools/daily.py          # pemindai --record tanpa AI (gratis), lalu nilai yang jatuh tempo
-python tools/daily.py --ai     # opsional: satu panggilan model untuk shortlist
-```
+| Jam | Skrip | Fungsi |
+|---|---|---|
+| 07:15 | `python tools/daily.py` | scan, catat pilihan, tulis `data/scan.json`, nilai yang jatuh tempo |
+| 09:00 | `python tools/execute.py` | jual stop/target, beli sesuai aturan, tulis buku **paper** |
+| 16:05 | `python tools/report.py` | laporan harian, settle, kirim Telegram bila dikonfigurasi |
 
-Jadwalkan berkas itu lewat cron/Task Scheduler; contoh ada di docstring `tools/daily.py`.
+Buku paper ada di `core/paper.py` dan **terpisah** dari portofolio asli. Ini simulasi:
+tidak ada order broker. Telegram diaktifkan dengan `TELEGRAM_BOT_TOKEN` dan
+`TELEGRAM_CHAT_ID` di `.env`; tanpa itu laporan tetap ditulis ke `data/`.
+
 Tab Jurnal menampilkan jumlah sampel dan margin kesalahan 95% di samping hit rate:
 dari ±34 keputusan berarah, angka "50% tepat" masih bisa berarti 33% atau 67%.
 Jangan ubah bobot atau ambang sebelum sampel berarah mencapai ~96 (presisi ±10%).
@@ -483,7 +488,7 @@ proksi harga, dan kartunya berlabel `proksi`.
 Dua rangkaian offline — tanpa jaringan, tanpa kunci API — dijalankan CI pada setiap push:
 
 ```bash
-python tools/test_pure.py        # 132 cek backend: indikator, dewan, jurnal, pemindai, HTTP
+python tools/test_pure.py        # 139 cek backend: indikator, dewan, jurnal, pemindai, HTTP
 node tools/test_pure.mjs         # 51 cek frontend: ringkasan, simulator, chart, escape, ticker
 ```
 

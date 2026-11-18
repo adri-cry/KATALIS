@@ -16,8 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import advisor, desk, guidance, journal, llm, market, screener, simulation, store  # noqa: E402
+from core import advisor, desk, guidance, journal, llm, market, paper, screener, simulation, store  # noqa: E402
 import app as app_module  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import daily as daily_tool  # noqa: E402
+import execute as execute_tool  # noqa: E402
 
 CHECKS: list[tuple[str, bool, str]] = []
 
@@ -849,6 +852,58 @@ try:
         journal.market.chart, store.pending, store.settle = real_chart, real_pending, real_settle
 except Exception as exc:  # noqa: BLE001 — a broken fixture must fail a check, not the file
     check("jurnal: pengujian sesi volume-0 berjalan", False, str(exc))
+
+# ---- paper ledger (separate from the real portfolio) ------------------------
+real_db_paper = store.DB_PATH
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        store.DB_PATH = Path(tmp) / "paper.db"
+        paper.init()
+        check("paper: modal awal terpasang", paper.cash() == paper.DEFAULT_CAPITAL)
+        paper.buy("BBCA.JK", 100, 5000, "uji beli")
+        check("paper: beli mengurangi kas dan membuka posisi",
+              abs(paper.cash() - (paper.DEFAULT_CAPITAL - 500000)) < 1
+              and len(paper.state()["positions"]) == 1)
+        paper.sell("BBCA.JK", 100, 5100, "uji jual")
+        trade = paper.trades(1)[0]
+        check("paper: jual memulihkan kas dan mencatat P/L",
+              trade["side"] == "jual" and trade["pnl"] == 10000
+              and abs(paper.cash() - (paper.DEFAULT_CAPITAL + 10000)) < 1, str(trade))
+        check("paper: ukuran lot mematuhi risiko 1% dan batas 10%",
+              execute_tool._lot_size(1000, 950, 10_000_000) == 10,
+              str(execute_tool._lot_size(1000, 950, 10_000_000)))
+        bad_buy = False
+        try:
+            paper.buy("BBCA.JK", 100, 1e9, "kas tidak cukup")
+        except ValueError:
+            bad_buy = True
+        check("paper: pembelian melebihi kas ditolak", bad_buy)
+finally:
+    store.DB_PATH = real_db_paper
+
+# ---- the 07:15 scan file the 09:00 executor reads ---------------------------
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "scan.json"
+        written = daily_tool.write_scan({
+            "as_of": "2026-11-18", "errors": [],
+            "candidates": [
+                {"symbol": "BBCA.JK", "pick": True, "atr_pct": 3.4,
+                 "mechanical": {"rating": "Buy", "composite": 1.2},
+                 "plan": {"entry": 5000, "stop": 4700, "target": 5600, "reward_risk": 2.0}},
+                {"symbol": "BBRI.JK", "pick": False, "atr_pct": 2.0,
+                 "mechanical": {"rating": "Hold", "composite": 0.1},
+                 "plan": {"entry": 4000, "stop": 3800, "target": 4400, "reward_risk": 2.0}},
+            ],
+        }, target)
+        loaded = execute_tool.load_scan(target)
+        check("scan: hanya pilihan yang ditulis untuk eksekutor",
+              len(written["picks"]) == 1 and written["picks"][0]["symbol"] == "BBCA.JK"
+              and loaded["picks"] == written["picks"], str(written["picks"]))
+        check("scan: level mesin ikut tersimpan",
+              loaded["picks"][0]["stop"] == 4700 and loaded["picks"][0]["atr_pct"] == 3.4)
+finally:
+    pass
 
 # ---- report -----------------------------------------------------------------
 failed = 0

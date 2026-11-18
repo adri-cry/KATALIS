@@ -361,6 +361,7 @@ def _row(analysis: dict, verdict: dict | None, pick: bool) -> dict:
             "sources": {r["key"]: (r["source"] if r["available"] else "none") for r in analysis["roles"]},
         },
         "plan": {key: plan.get(key) for key in ("entry", "stop", "target", "reward_risk")},
+        "atr_pct": analysis["indicators"].get("atr_pct"),
         "flags": _flags(analysis),
         "ai": verdict,
     }

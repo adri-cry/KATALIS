@@ -14,12 +14,46 @@ when you explicitly want the model to review the shortlist (one paid call).
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import journal, screener, store  # noqa: E402
+
+
+WIB = timezone(timedelta(hours=7))
+SCAN_FILE = Path(__file__).resolve().parent.parent / "data" / "scan.json"
+
+
+def write_scan(result: dict, path: Path = SCAN_FILE) -> dict:
+    """The 09:00 executor reads this, not a fresh screen (which would be wasteful)."""
+    payload = {
+        "as_of": result["as_of"],
+        "generated_at": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB"),
+        "picks": [
+            {
+                "symbol": row["symbol"],
+                "rating": row["mechanical"]["rating"],
+                "composite": row["mechanical"]["composite"],
+                "atr_pct": row.get("atr_pct"),
+                "entry": row["plan"]["entry"],
+                "stop": row["plan"]["stop"],
+                "target": row["plan"]["target"],
+                "reward_risk": row["plan"]["reward_risk"],
+            }
+            for row in result["candidates"] if row["pick"]
+        ],
+        "errors": result["errors"],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp, path)
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,9 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     store.init()
     screen = screener.screen(max_picks=args.top, shortlist=args.shortlist,
                              ai=True if args.ai else False, record=True)
+    scan = write_scan(screen)
     print(f"Pemindai {screen['as_of']}: {screen['universe']} saham, "
-          f"{len(screen['candidates'])} kandidat, {len(screen['picks'])} pilihan "
-          f"({screen['picks_source']}).")
+          f"{len(screen['candidates'])} kandidat, {len(scan['picks'])} pilihan "
+          f"({screen['picks_source']}) → data/scan.json")
     for item in screen["recorded"]:
         print("  jurnal: " + item["symbol"] + (
             f" #{item['id']}" if item["id"] else " sudah tercatat hari ini"))

@@ -108,7 +108,7 @@ Sudah:
 - UI: fallback server lama memakai status 404, bukan teks pesan; tab punya
   `aria-controls`/`aria-labelledby`; watchlist tidak direbuild bila markup sama; poll
   berhenti saat tab tersembunyi.
-- Verifikasi: `tools/test_pure.py` 132/132, `tools/test_pure.mjs` 51/51, plus probe
+- Verifikasi: `tools/test_pure.py` 139/139, `tools/test_pure.mjs` 51/51, plus probe
   HTTP langsung (400/403/413/415, traversal 404, SSE/tick/benchmark).
 
 ## Audit 18-11-2026: delapan bug runtime
@@ -149,6 +149,22 @@ Semua ditemukan dengan mereproduksinya, lalu ada tes regresinya:
   `guidance.MAX_ATR_PCT` (7%), `guidance.MIN_REWARD_RISK` (1:1), dan minimal 3 peran.
   Pengecekan kesegaran tetap di lapis 1 karena ia memakai tanggal `today` dari pemanggil,
   bukan jam dinding. Lapis 1 sengaja tetap inklusif untuk saham murah/tipis.
+
+## Pipeline paper trading (permintaan pemilik)
+
+Tanpa bot AI. Cron di mesin ini, Senin–Jumat WIB: 07:15 `tools/daily.py`,
+09:00 `tools/execute.py`, 16:05 `tools/report.py`. Aturan dikunci di `MANDATE.md`.
+
+- `core/paper.py` — buku besar terpisah (`paper_cash`, `paper_positions`,
+  `paper_trades`) dengan modal awal Rp10 juta. Tidak pernah menyentuh
+  `store.portfolio` / `store.cash`.
+- `daily.py` menulis `data/scan.json` berisi pilihan + level mesin; `execute.py`
+  membacanya, menjual stop/target, lalu membeli. Kalau tidak ada yang lolos,
+  tetap beli 1 lot `mode: belajar` supaya tidak ada hari tanpa aktivitas.
+- `report.py` menulis `data/laporan-YYYY-MM-DD.md`, menjalankan `settle_all()`,
+  dan mengirim versi pendek ke Telegram lewat `core/notify.py` bila
+  `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` terisi. Tanpa itu diam-diam dilewati.
+- Dilarang mengubah bobot/Gate sebelum ≥96 keputusan berarah (lihat MANDATE).
 
 ## Batas yang diketahui
 
